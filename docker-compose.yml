@@ -1,45 +1,16 @@
 version: '3.8'
 
 services:
-  bot:
+  quiz_bot:
     build: .
-    container_name: quiz_bot
+    container_name: smart_quiz_bot
     restart: always
     env_file:
       - .env
-    depends_on:
-      postgres_db:
-        condition: service_healthy
-      redis_cache:
-        condition: service_started
-
-  postgres_db:
-    image: postgres:15-alpine
-    container_name: quiz_bot_pg
-    restart: always
-    environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: super_password
-      POSTGRES_DB: quiz_bot
-    ports:
-      - "5432:5432"
     volumes:
-      - pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d quiz_bot"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis_cache:
-    image: redis:7-alpine
-    container_name: quiz_bot_redis
-    restart: always
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-
-volumes:
-  pg_data:
-  redis_data:
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
