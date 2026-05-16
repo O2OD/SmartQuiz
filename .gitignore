@@ -1,3 +1,14 @@
-.venv
+# Xavfsizlik va sirlar
 .env
-smartquiz.pem
+
+# Kesh va virtual muhitlar
+__pycache__/
+*.pyc
+.venv/
+env/
+.idea/
+.vscode/
+
+# Natijalar va test fayllar (agar saqlangan bo'lsa)
+barcha_natijalar.csv
+*.docx

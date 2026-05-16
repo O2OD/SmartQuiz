@@ -72,9 +72,10 @@ async def start_handler(message: types.Message, command: CommandObject, bot: Bot
             )
         else:
             await message.answer(
-                "🤖 <b>SmartQuiz Botiga xush kelibsiz!</b>\n\n"
-                "Bu bot orqali siz turli xil testlarni ishlashingiz, o'z bilimingizni sinab ko'rishingiz mumkin.\n\n"
-                "⚠️ <i>Sizda test yaratish huquqi yo'q. Agar siz ham shunday testlar tuzmoqchi bo'lsangiz yoki hamkorlik qilmoqchi bo'lsangiz, asoschiga murojaat qiling:</i> @PigeonPY",
+                "🤖 <b>Asalomu alaykum, SmartQuiz botga xush kelibsiz!</b>\n\n"
+                "Bu bot orqali testlarni juda oson va tez tuzish mumkin. "
+                "Lekin sizda test yaratish huquqi yo'q. Agar sizga test kerak bo'lsa, adminga murojaat qiling: "
+                "<a href=\"https://t.me/PigeonPY\">OZOD</a>",
                 parse_mode="HTML"
             )
         return
@@ -83,7 +84,9 @@ async def start_handler(message: types.Message, command: CommandObject, bot: Bot
         quiz_id = args.split("_")[1]
         await prepare_solo_test(message, quiz_id, bot)
     elif args.startswith("group_"):
-        await message.answer("👥 Gurux rejimi tez orada ishga tushadi! Hozircha yakkaxon rejimda ishlashingiz mumkin.")
+        from handlers.group_quiz import prepare_group_test
+        quiz_id = args.split("_")[1]
+        await prepare_group_test(message, quiz_id, bot)
 
 @admin_router.message(Command("clear"))
 async def clear_command_handler(message: types.Message, state: FSMContext):
@@ -96,23 +99,20 @@ async def clear_command_handler(message: types.Message, state: FSMContext):
 @admin_router.callback_query(F.data == "admin_clear")
 async def admin_clear_cb(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.answer("🧹 Barcha jarayonlar tozalandi!", show_alert=True)
-    await call.message.answer("Sessiya tozalandi. Qanday yordam bera olaman?", reply_markup=ReplyKeyboardRemove())
+    await call.answer("🧹 Holat tozalandi!", show_alert=False)
+    await call.message.answer("🧹 Holat tozalandi! Yangi test faylini (.docx) yuborishingiz mumkin.", reply_markup=ReplyKeyboardRemove())
 
-@admin_router.callback_query(F.data == "admin_stats", F.from_user.id == settings.ADMIN_ID)
-async def stats_cb(call: types.CallbackQuery):
-    await call.answer("Statistika yuklanmoqda...")
+async def get_statistics_text() -> str:
     async with async_session_maker() as db:
         stmt = (
             select(
                 User.full_name,
-                Result.quiz_name,
+                User.username,
                 func.count(Result.id).label("attempts"),
-                func.max(Result.score).label("best_score"),
-                func.max(Result.total).label("total_q")
+                func.sum(Result.score).label("total_score")
             )
             .join(User, User.user_id == Result.user_id)
-            .group_by(User.full_name, Result.quiz_name)
+            .group_by(User.full_name, User.username, User.user_id)
             .order_by(desc("attempts"))
             .limit(15)
         )
@@ -120,17 +120,34 @@ async def stats_cb(call: types.CallbackQuery):
         results = records.all()
 
     if not results:
-        await call.message.answer("Hozircha hech qanday natija yo'q.")
-        return
+        return "Hozircha hech qanday natija yo'q."
 
     text = "📊 <b>Top-15 Eng Faol Foydalanuvchilar:</b>\n\n"
-    for row in results:
-        text += f"👤 <b>{row.full_name}</b>\n"
-        text += f"📝 Test: {row.quiz_name}\n"
-        text += f"🔄 Urinishlar: {row.attempts} marta\n"
-        text += f"🏆 Eng yaxshi natija: {row.best_score}/{row.total_q}\n"
-        text += "〰️〰️〰️〰️〰️〰️〰️\n"
+    for idx, row in enumerate(results, start=1):
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        prefix = medals.get(idx, f"<b>{idx}.</b>")
+        score = row.total_score if row.total_score else 0
+        
+        # Username bor bo'lsa @ bilan yozadi, bo'lmasa bo'sh joy qoldiradi
+        username_text = f" (@{row.username})" if row.username and row.username != "mavjud_emas" else ""
+        
+        text += (
+            f"{prefix} <b>{row.full_name}</b>{username_text}\n"
+            f"├ 🔄 Jami urinishlar: {row.attempts} marta\n"
+            f"└ ✅ Jami to'g'ri javoblar: {score} ta\n\n"
+        )
 
+    return text
+
+@admin_router.message(Command("stats"), F.from_user.id == settings.ADMIN_ID)
+async def stats_command_handler(message: types.Message):
+    text = await get_statistics_text()
+    await message.answer(text, parse_mode="HTML")
+
+@admin_router.callback_query(F.data == "admin_stats", F.from_user.id == settings.ADMIN_ID)
+async def stats_cb(call: types.CallbackQuery):
+    await call.answer("Statistika yuklanmoqda...")
+    text = await get_statistics_text()
     await call.message.answer(text, parse_mode="HTML")
 
 @admin_router.callback_query(F.data == "admin_export", F.from_user.id == settings.ADMIN_ID)
@@ -207,6 +224,7 @@ async def handle_document(message: types.Message, bot: Bot, state: FSMContext):
     await message.answer("⏱ Har bir savol uchun vaqtni (soniyada) tanlang yoki yozing:", reply_markup=markup)
 
 @admin_router.message(QuizState.waiting_for_time, F.from_user.id == settings.ADMIN_ID)
+@admin_router.message(QuizState.waiting_for_time, F.from_user.id == settings.ADMIN_ID)
 async def set_time_handler(message: types.Message, state: FSMContext, bot: Bot):
     if not message.text.isdigit():
         return
@@ -225,6 +243,7 @@ async def set_time_handler(message: types.Message, state: FSMContext, bot: Bot):
     
     bot_link = f"https://t.me/{bot_username}?start=solo_{quiz_id}"
     
+    # MANA SHU YER O'ZGARDI
     share_text = (
         f"👆 Yuqoridagi ssilka orqali testni boshlang!\n\n"
         f"📚 Mavzu: {quiz_name}\n"
@@ -233,7 +252,6 @@ async def set_time_handler(message: types.Message, state: FSMContext, bot: Bot):
         f"👨‍💻 Admin: @PigeonPY"
     )
     
-    # 100% ishonchli usul (url parametri qaytarildi)
     share_url = f"https://t.me/share/url?url={bot_link}&text={urllib.parse.quote(share_text)}"
     
     markup = InlineKeyboardMarkup(inline_keyboard=[

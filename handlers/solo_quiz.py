@@ -44,9 +44,10 @@ async def prepare_solo_test(message: types.Message, quiz_id: str, bot: Bot):
         f"🎲 <b>\"{quiz_data['name']}\"</b> testiga tayyorlaning\n\n"
         f"🖊 {len(quiz_data['questions'])} ta savol\n"
         f"⏱ Har bir savol uchun {quiz_data['time']} soniya\n\n"
-        f"🏁 Tayyor bo'lganingizda quyidagi tugmani bosing."
+        f"🏁 Tayyor bo'lganingizda quyidagi tugmani bosing.\n\n"
+        f"👨‍💻 <b>Admin:</b> <a href=\"https://t.me/PigeonPY\">OZOD</a>"
     )
-    await message.answer(text, reply_markup=markup, parse_mode="HTML")
+    await message.answer(text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
 
 @solo_router.callback_query(F.data.startswith("start_solo_"))
 async def start_countdown(call: types.CallbackQuery, bot: Bot):
@@ -86,10 +87,10 @@ async def start_countdown(call: types.CallbackQuery, bot: Bot):
     
     await ask_solo_question(call.from_user.id, bot)
 
-@solo_router.poll_answer()
+@solo_router.poll_answer(lambda pa: active_polls.get(pa.poll_id, {}).get("type") == "solo")
 async def handle_poll_answer(pa: types.PollAnswer, bot: Bot):
     poll_data = active_polls.pop(pa.poll_id, None)
-    if not poll_data or poll_data.get("type") != "solo":
+    if not poll_data:
         return
 
     user_id = poll_data["user_id"]
@@ -193,15 +194,6 @@ async def ask_solo_question(user_id: int, bot: Bot):
     question = questions[current_idx]
     time_limit = quiz_data["time"]
 
-    test_controls_kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="⏸ Pauza"), KeyboardButton(text="⏹ To'xtatish")],
-            [KeyboardButton(text="🔄 Boshidan")]
-        ],
-        resize_keyboard=True,
-        is_persistent=True
-    )
-
     msg = await bot.send_poll(
         chat_id=user_id,
         question=f"{current_idx + 1}/{len(questions)}. {question['savol'][:290]}",
@@ -238,14 +230,21 @@ async def monitor_poll_timeout(user_id: int, poll_id: str, timeout: int, bot: Bo
 
     if session["misses"] >= 2:
         session["status"] = "paused"
+        
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="▶️ Davom etish", callback_data="resume_solo")]
         ])
+        
         p_msg = await bot.send_message(
             chat_id=user_id,
-            text="⏸ <b>Test avtomatik pauza qilindi.</b>\n\nKetma-ket 2 ta savolga javob bermadingiz. Davom etish uchun pastdagi tugmani bosing.",
+            text=(
+                f"⏸ <b>Test avtomatik pauza qilindi.</b>\n\n"
+                f"Ketma-ket 2 ta savolga javob bermadingiz. Davom etish uchun pastdagi tugmani bosing.\n\n"
+                f"👨‍💻 <b>Admin:</b> <a href=\"https://t.me/PigeonPY\">OZOD</a>"
+            ),
             reply_markup=markup,
-            parse_mode="HTML"
+            parse_mode="HTML",
+            disable_web_page_preview=True
         )
         session["msg_ids"].append(p_msg.message_id)
     else:
@@ -256,18 +255,23 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, quiz_data: dic
         with contextlib.suppress(Exception):
             await bot.delete_message(user_id, m_id)
 
+    temp_msg = await bot.send_message(user_id, "⏳", reply_markup=ReplyKeyboardRemove())
+    with contextlib.suppress(Exception):
+        await temp_msg.delete()
+
     time_spent = round(time.time() - session['start_time'])
     total_q = len(questions)
     correct = session['score']
     missed = session['total_missed']
-    wrong = (session['current_idx'] if force_stop else total_q) - correct - missed
+    seen_q = session['current_idx'] if force_stop else total_q
+    wrong = seen_q - correct - missed
 
     async with async_session_maker() as db_session:
         new_result = Result(
             user_id=user_id,
             quiz_name=quiz_data['name'],
             score=correct,
-            total=total_q,
+            total=seen_q,
             time_spent=time_spent
         )
         db_session.add(new_result)
@@ -293,15 +297,16 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, quiz_data: dic
     
     text = (
         f"{title}\n\n"
-        f"Siz <b>{session['current_idx'] if force_stop else total_q}</b> ta savol ko'rdingiz:\n\n"
+        f"Siz <b>{seen_q}</b> ta savol ko'rdingiz:\n\n"
         f"✅ To'g'ri – {correct}\n"
         f"❌ Xato – {wrong}\n"
         f"⏳ Tashlab ketilgan – {missed}\n"
         f"⏱ Vaqt: {time_spent} soniya\n\n"
-        f"🏆 Sizning natijangiz bazaga saqlandi."
+        f"🏆 Sizning natijangiz bazaga saqlandi.\n\n"
+        f"👨‍💻 <b>Admin:</b> <a href=\"https://t.me/PigeonPY\">OZOD</a>"
     )
         
-    await bot.send_message(user_id, text, reply_markup=markup, parse_mode="HTML")
+    await bot.send_message(user_id, text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
 
 @solo_router.callback_query(F.data == "end_quiz_and_exit")
 async def end_quiz_and_exit_cb(call: types.CallbackQuery, state: FSMContext):
