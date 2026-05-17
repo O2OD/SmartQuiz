@@ -4,8 +4,8 @@ import contextlib
 import random
 import urllib.parse
 from aiogram import Router, Bot, types, F
-
-
+from aiogram.filters import CommandStart
+from core.config import settings
 from database.engine import async_session_maker
 from database.models import Result
 from aiogram.types import (
@@ -38,6 +38,24 @@ def format_time(seconds: int) -> str:
     if secs == 0:
         return f"{minutes} daqiqa"
     return f"{minutes} daqiqa {secs} soniya"
+
+@solo_router.message(CommandStart())
+async def cmd_start(message: types.Message, bot: Bot):
+    if "solo_" in message.text:
+        quiz_id = message.text.split("solo_")[1]
+        await prepare_solo_test(message, quiz_id, bot)
+        return
+
+    if message.from_user.id == settings.ADMIN_ID:
+        await message.answer(
+            "👋 Salom Admin!\n\nYangi test yaratish uchun savollar yozilgan <b>.docx</b> faylini yuboring.\n\nBuyruqlar: /stats, /clear",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            "👋 Salom! Men tezkor testlar botiman.\n\n"
+            "Test ishlash uchun sizga berilgan maxsus ssilka ustiga bosing."
+        )
 
 async def prepare_solo_test(message: types.Message, quiz_id: str, bot: Bot):
     if quiz_id not in db_quizzes:

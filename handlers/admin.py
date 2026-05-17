@@ -3,6 +3,7 @@ import urllib.parse
 import uuid
 from docx import Document
 from aiogram import Router, Bot, types, F
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -10,7 +11,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 from core.config import settings
-from handlers.solo_quiz import db_quizzes
+from handlers.solo_quiz import db_quizzes, solo_sessions
 
 admin_router = Router()
 
@@ -20,12 +21,28 @@ class QuizState(StatesGroup):
 
 time_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="15"), KeyboardButton(text="20"), KeyboardButton(text="25")],
-        [KeyboardButton(text="30"), KeyboardButton(text="45"), KeyboardButton(text="60")]
+        [KeyboardButton(text="10"), KeyboardButton(text="20"), KeyboardButton(text="30")],
+        [KeyboardButton(text="40"), KeyboardButton(text="50"), KeyboardButton(text="60")]
     ],
     resize_keyboard=True,
     one_time_keyboard=True
 )
+
+@admin_router.message(Command("stats"), F.from_user.id == settings.ADMIN_ID)
+async def get_stats(message: types.Message):
+    total_quizzes = len(db_quizzes)
+    active_users = len(solo_sessions)
+    text = (
+        "📊 <b>Bot Statistikasi</b>\n\n"
+        f"📁 Jami testlar bazasi: {total_quizzes} ta\n"
+        f"🏃‍♂️ Hozir test ishlayotganlar: {active_users} kishi\n"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+@admin_router.message(Command("clear"), F.from_user.id == settings.ADMIN_ID)
+async def clear_state(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🧹 Holat tozalandi. Yangi fayl yuklashingiz mumkin.", reply_markup=ReplyKeyboardRemove())
 
 @admin_router.message(F.document, F.from_user.id == settings.ADMIN_ID)
 async def handle_docx_file(message: types.Message, state: FSMContext, bot: Bot):
@@ -89,8 +106,8 @@ async def handle_docx_file(message: types.Message, state: FSMContext, bot: Bot):
         )
         await state.set_state(QuizState.waiting_for_time)
 
-    except Exception as e:
-        await message.answer(f"⚠️ Faylni o'qishda xatolik yuz berdi: {e}")
+    except Exception:
+        pass
     finally:
         if os.path.exists(local_filename):
             os.remove(local_filename)
@@ -98,7 +115,7 @@ async def handle_docx_file(message: types.Message, state: FSMContext, bot: Bot):
 @admin_router.message(QuizState.waiting_for_time, F.from_user.id == settings.ADMIN_ID)
 async def set_time_handler(message: types.Message, state: FSMContext, bot: Bot):
     if not message.text.isdigit():
-        await message.answer("⚠️ Iltimos, faqat raqam kiriting (masalan: 15)")
+        await message.answer("⚠️ Iltimos, faqat raqam kiriting (masalan: 20)")
         return
         
     vaqt = int(message.text)
@@ -117,7 +134,7 @@ async def set_time_handler(message: types.Message, state: FSMContext, bot: Bot):
     share_url = f"https://t.me/share/url?url={bot_link}&text={urllib.parse.quote(share_text)}"
     
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ Boshlash", url=bot_link)],
+        [InlineKeyboardButton(text="▶️ Boshlash", callback_data=f"start_solo_{quiz_id}")],
         [InlineKeyboardButton(text="↗️ Ulashish", url=share_url)]
     ])
     
