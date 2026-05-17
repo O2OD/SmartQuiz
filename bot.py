@@ -7,7 +7,7 @@ from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeCha
 from core.config import settings
 from database.engine import init_models
 from handlers.solo_quiz import solo_router
-from handlers.group_quiz import group_router
+
 from handlers.admin import admin_router
 
 async def set_bot_commands(bot: Bot):
@@ -44,7 +44,7 @@ async def main():
     dp = Dispatcher()
     
     dp.include_router(solo_router)
-    dp.include_router(group_router)
+   
     dp.include_router(admin_router)
     
     await set_bot_commands(bot)

@@ -1,9 +1,11 @@
 import asyncio
 import time
 import contextlib
+import random
+import urllib.parse
 from aiogram import Router, Bot, types, F
-from aiogram.fsm.context import FSMContext
-from core.config import settings
+
+
 from database.engine import async_session_maker
 from database.models import Result
 from aiogram.types import (
@@ -29,23 +31,41 @@ test_controls_kb = ReplyKeyboardMarkup(
     is_persistent=True
 )
 
+def format_time(seconds: int) -> str:
+    minutes, secs = divmod(seconds, 60)
+    if minutes == 0:
+        return f"{secs} soniya"
+    if secs == 0:
+        return f"{minutes} daqiqa"
+    return f"{minutes} daqiqa {secs} soniya"
+
 async def prepare_solo_test(message: types.Message, quiz_id: str, bot: Bot):
     if quiz_id not in db_quizzes:
         await message.answer("⚠️ Bu test topilmadi yoki muddati o'tgan.", reply_markup=ReplyKeyboardRemove())
         return
         
     quiz_data = db_quizzes[quiz_id]
+    bot_info = await bot.get_me()
+    
+    quiz_name = quiz_data['name']
+    q_count = len(quiz_data['questions'])
+    vaqt = quiz_data['time']
+    
+    bot_link = f"https://t.me/{bot_info.username}?start=solo_{quiz_id}"
+    share_text = f"Men {quiz_name} testini yechmoqchiman. Sen ham sinab ko'r!"
+    share_url = f"https://t.me/share/url?url={bot_link}&text={urllib.parse.quote(share_text)}"
     
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Men tayyorman!", callback_data=f"start_solo_{quiz_id}")]
+        [InlineKeyboardButton(text="▶️ Boshlash", callback_data=f"start_solo_{quiz_id}")],
+        [InlineKeyboardButton(text="↗️ Ulashish", url=share_url)]
     ])
     
     text = (
-        f"🎲 <b>\"{quiz_data['name']}\"</b> testiga tayyorlaning\n\n"
-        f"🖊 {len(quiz_data['questions'])} ta savol\n"
-        f"⏱ Har bir savol uchun {quiz_data['time']} soniya\n\n"
-        f"🏁 Tayyor bo'lganingizda quyidagi tugmani bosing.\n\n"
-        f"👨‍💻 <b>Admin:</b> <a href=\"https://t.me/PigeonPY\">OZOD</a>"
+        f"🏷 <b>Mavzu:</b> {quiz_name}\n"
+        f"📊 <b>Savollar:</b> {q_count} ta\n"
+        f"⏳ <b>Vaqt:</b> Har biriga {vaqt} soniya\n\n"
+        "Quyidagi tugmalar orqali testni o'zingiz ishlashingiz yoki do'stlaringizga ulashishingiz mumkin.\n\n"
+        "👨‍💻 <b>Admin:</b> <a href='https://t.me/PigeonPY'>OZOD</a>"
     )
     await message.answer(text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
 
@@ -65,8 +85,7 @@ async def start_countdown(call: types.CallbackQuery, bot: Bot):
         "total_missed": 0,
         "status": "active",
         "start_time": time.time(),
-        "active_poll_id": None,
-        "msg_ids": [] 
+        "active_poll_id": None
     }
     
     msg = await call.message.edit_text("⏳ Tayyorlaning...")
@@ -77,13 +96,12 @@ async def start_countdown(call: types.CallbackQuery, bot: Bot):
     with contextlib.suppress(Exception):
         await msg.delete()
     
-    info_msg = await bot.send_message(
+    await bot.send_message(
         call.from_user.id, 
         "🚀 <b>Boshladik!</b>\n<i>Testni boshqarish uchun pastdagi tugmalardan foydalaning.</i>",
         reply_markup=test_controls_kb,
         parse_mode="HTML"
     )
-    solo_sessions[call.from_user.id]["msg_ids"].append(info_msg.message_id)
     
     await ask_solo_question(call.from_user.id, bot)
 
@@ -119,13 +137,11 @@ async def manual_pause(message: types.Message, bot: Bot):
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="▶️ Davom etish", callback_data="resume_solo")]
         ])
-        p_msg = await message.answer(
+        await message.answer(
             "⏸ <b>Test pauza qilindi.</b>\n\nDavom etish uchun pastdagi tugmani bosing.", 
             reply_markup=markup, 
             parse_mode="HTML"
         )
-        session["msg_ids"].append(p_msg.message_id)
-        session["msg_ids"].append(message.message_id)
 
 @solo_router.message(F.text == "⏹ To'xtatish")
 async def manual_stop(message: types.Message, bot: Bot):
@@ -145,11 +161,6 @@ async def manual_restart(message: types.Message, bot: Bot):
     if not session:
         return
         
-    for m_id in session.get("msg_ids", []):
-        with contextlib.suppress(Exception):
-            await bot.delete_message(user_id, m_id)
-            
-    session["msg_ids"] = []
     session["current_idx"] = 0
     session["score"] = 0
     session["misses"] = 0
@@ -157,9 +168,7 @@ async def manual_restart(message: types.Message, bot: Bot):
     session["status"] = "active"
     session["start_time"] = time.time()
     
-    r_msg = await message.answer("🔄 Test boshidan boshlandi!")
-    session["msg_ids"].append(r_msg.message_id)
-    session["msg_ids"].append(message.message_id)
+    await message.answer("🔄 Test boshidan boshlandi!")
     await ask_solo_question(user_id, bot)
 
 @solo_router.callback_query(F.data == "resume_solo")
@@ -194,21 +203,27 @@ async def ask_solo_question(user_id: int, bot: Bot):
     question = questions[current_idx]
     time_limit = quiz_data["time"]
 
+    original_options = question['variantlar']
+    correct_text = original_options[question['togri']]
+    
+    shuffled_options = original_options.copy()
+    random.shuffle(shuffled_options)
+    new_correct_id = shuffled_options.index(correct_text)
+
     msg = await bot.send_poll(
         chat_id=user_id,
         question=f"{current_idx + 1}/{len(questions)}. {question['savol'][:290]}",
-        options=[o[:100] for o in question['variantlar']],
+        options=[o[:100] for o in shuffled_options],
         type="quiz",
         is_anonymous=False,
-        correct_option_id=question['togri'],
+        correct_option_id=new_correct_id,
         open_period=time_limit,
         reply_markup=test_controls_kb
     )
 
     poll_id = msg.poll.id
     session["active_poll_id"] = poll_id
-    session["msg_ids"].append(msg.message_id)
-    active_polls[poll_id] = {"type": "solo", "user_id": user_id, "correct_id": question["togri"]}
+    active_polls[poll_id] = {"type": "solo", "user_id": user_id, "correct_id": new_correct_id}
 
     asyncio.create_task(monitor_poll_timeout(user_id, poll_id, time_limit, bot))
 
@@ -235,31 +250,28 @@ async def monitor_poll_timeout(user_id: int, poll_id: str, timeout: int, bot: Bo
             [InlineKeyboardButton(text="▶️ Davom etish", callback_data="resume_solo")]
         ])
         
-        p_msg = await bot.send_message(
+        await bot.send_message(
             chat_id=user_id,
             text=(
-                f"⏸ <b>Test avtomatik pauza qilindi.</b>\n\n"
-                f"Ketma-ket 2 ta savolga javob bermadingiz. Davom etish uchun pastdagi tugmani bosing.\n\n"
-                f"👨‍💻 <b>Admin:</b> <a href=\"https://t.me/PigeonPY\">OZOD</a>"
+                "⏸ <b>Test avtomatik pauza qilindi.</b>\n\n"
+                "Ketma-ket 2 ta savolga javob bermadingiz. Davom etish uchun pastdagi tugmani bosing.\n\n"
+                "👨‍💻 <b>Admin:</b> <a href='https://t.me/PigeonPY'>OZOD</a>"
             ),
             reply_markup=markup,
             parse_mode="HTML",
             disable_web_page_preview=True
         )
-        session["msg_ids"].append(p_msg.message_id)
     else:
         await ask_solo_question(user_id, bot)
 
 async def finish_solo_test(user_id: int, bot: Bot, session: dict, quiz_data: dict, questions: list, force_stop: bool = False):
-    for m_id in session.get("msg_ids", []):
-        with contextlib.suppress(Exception):
-            await bot.delete_message(user_id, m_id)
-
-    temp_msg = await bot.send_message(user_id, "⏳", reply_markup=ReplyKeyboardRemove())
+    temp_msg = await bot.send_message(user_id, "⏳ Natijalar hisoblanmoqda...", reply_markup=ReplyKeyboardRemove())
     with contextlib.suppress(Exception):
         await temp_msg.delete()
 
-    time_spent = round(time.time() - session['start_time'])
+    raw_time = round(time.time() - session['start_time'])
+    time_str = format_time(raw_time)
+    
     total_q = len(questions)
     correct = session['score']
     missed = session['total_missed']
@@ -272,7 +284,7 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, quiz_data: dic
             quiz_name=quiz_data['name'],
             score=correct,
             total=seen_q,
-            time_spent=time_spent
+            time_spent=raw_time 
         )
         db_session.add(new_result)
         await db_session.commit()
@@ -284,52 +296,22 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, quiz_data: dic
         [InlineKeyboardButton(text="🔄 Boshidan boshlash", callback_data=f"start_solo_{quiz_id_for_restart}")]
     ]
     
-    if user_id == settings.ADMIN_ID:
-        kb.append([InlineKeyboardButton(text="📝 Yangi test yaratish", callback_data="admin_new_test")])
-        
-    kb.append([
-        InlineKeyboardButton(text="🧹 Tozalash", callback_data="end_quiz_and_exit")
-    ])
-    
     markup = InlineKeyboardMarkup(inline_keyboard=kb)
-
     title = "🛑 Test to'xtatildi!" if force_stop else "🏁 Test yakunlandi!"
     
     text = (
-        f"{title}\n\n"
-        f"Siz <b>{seen_q}</b> ta savol ko'rdingiz:\n\n"
-        f"✅ To'g'ri – {correct}\n"
-        f"❌ Xato – {wrong}\n"
-        f"⏳ Tashlab ketilgan – {missed}\n"
-        f"⏱ Vaqt: {time_spent} soniya\n\n"
-        f"🏆 Sizning natijangiz bazaga saqlandi.\n\n"
-        f"👨‍💻 <b>Admin:</b> <a href=\"https://t.me/PigeonPY\">OZOD</a>"
+        f"<b>{title}</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📝 <b>Mavzu:</b> {quiz_data['name']}\n"
+        f"📊 <b>Jami savollar:</b> {seen_q} ta\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"✅ <b>To'g'ri javoblar:</b> {correct} ta\n"
+        f"❌ <b>Xato javoblar:</b> {wrong} ta\n"
+        f"⏳ <b>Tashlab ketilgan:</b> {missed} ta\n"
+        f"⏱ <b>Sarflangan vaqt:</b> {time_str}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🏆 Natijangiz muvaffaqiyatli saqlandi!\n\n"
+        "👨‍💻 <b>Admin:</b> <a href='https://t.me/PigeonPY'>OZOD</a>"
     )
         
     await bot.send_message(user_id, text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
-
-@solo_router.callback_query(F.data == "end_quiz_and_exit")
-async def end_quiz_and_exit_cb(call: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    
-    with contextlib.suppress(Exception):
-        await call.message.delete()
-        
-    temp_msg = await call.message.answer("🧹", reply_markup=ReplyKeyboardRemove())
-    with contextlib.suppress(Exception):
-        await temp_msg.delete()
-        
-    await call.answer("Chat xotirasi tozalandi!", show_alert=False)
-
-@solo_router.callback_query(F.data == "admin_new_test")
-async def admin_new_test_cb(call: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    with contextlib.suppress(Exception):
-        await call.message.delete()
-        
-    await call.message.answer(
-        "📝 <b>Yangi test yaratish:</b>\n\nIltimos, test savollari yozilgan <code>.docx</code> faylini yuboring.", 
-        parse_mode="HTML", 
-        reply_markup=ReplyKeyboardRemove()
-    )
-    await call.answer()
