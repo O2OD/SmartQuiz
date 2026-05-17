@@ -20,7 +20,7 @@ async def set_bot_commands(bot: Bot):
 
     # 2. Faqat admin uchun maxsus menyu
     admin_commands = [
-        BotCommand(command="start", description="👑 Admin panel"),
+       
         BotCommand(command="stats", description="📊 Statistika"),
         BotCommand(command="export", description="💾 Natijalar (Excel)"),
         BotCommand(command="clear", description="🧹 Tozalash")

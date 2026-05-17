@@ -5,6 +5,7 @@ import random
 import urllib.parse
 from aiogram import Router, Bot, types, F
 from aiogram.filters import CommandStart
+
 from core.config import settings
 from database.engine import async_session_maker
 from database.models import Result
@@ -41,20 +42,20 @@ def format_time(seconds: int) -> str:
 
 @solo_router.message(CommandStart())
 async def cmd_start(message: types.Message, bot: Bot):
-    if "solo_" in message.text:
+    if message.text and "solo_" in message.text:
         quiz_id = message.text.split("solo_")[1]
         await prepare_solo_test(message, quiz_id, bot)
         return
 
     if message.from_user.id == settings.ADMIN_ID:
         await message.answer(
-            "👋 Salom Admin!\n\nYangi test yaratish uchun savollar yozilgan <b>.docx</b> faylini yuboring.\n\nBuyruqlar: /stats, /clear",
+            "👋 Salom Admin!\n\nYangi test yaratish uchun savollar yozilgan <b>.docx</b> faylini yuboring.\n"
+            "Buyruqlar: /stats, /export, /clear",
             parse_mode="HTML"
         )
     else:
         await message.answer(
-            "👋 Salom! Men tezkor testlar botiman.\n\n"
-            "Test ishlash uchun sizga berilgan maxsus ssilka ustiga bosing."
+            "👋 Salom!\n\nTest ishlash uchun sizga berilgan maxsus ssilka ustiga bosing."
         )
 
 async def prepare_solo_test(message: types.Message, quiz_id: str, bot: Bot):
@@ -70,7 +71,13 @@ async def prepare_solo_test(message: types.Message, quiz_id: str, bot: Bot):
     vaqt = quiz_data['time']
     
     bot_link = f"https://t.me/{bot_info.username}?start=solo_{quiz_id}"
-    share_text = f"Men {quiz_name} testini yechmoqchiman. Sen ham sinab ko'r!"
+    share_text = (
+        "👆 Yuqoridagi ssilka orqali testni boshlang!\n\n"
+        f"📚 Mavzu: {quiz_name}\n"
+        f"🔢 Savollar soni: {q_count} ta\n"
+        f"⏳ Ajratilgan vaqt: {vaqt} soniya\n"
+        "👨‍💻 Admin: @PigeonPY"
+    )
     share_url = f"https://t.me/share/url?url={bot_link}&text={urllib.parse.quote(share_text)}"
     
     markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -272,8 +279,7 @@ async def monitor_poll_timeout(user_id: int, poll_id: str, timeout: int, bot: Bo
             chat_id=user_id,
             text=(
                 "⏸ <b>Test avtomatik pauza qilindi.</b>\n\n"
-                "Ketma-ket 2 ta savolga javob bermadingiz. Davom etish uchun pastdagi tugmani bosing.\n\n"
-                "👨‍💻 <b>Admin:</b> <a href='https://t.me/PigeonPY'>OZOD</a>"
+                "Ketma-ket 2 ta savolga javob bermadingiz. Davom etish uchun pastdagi tugmani bosing."
             ),
             reply_markup=markup,
             parse_mode="HTML",
@@ -328,8 +334,7 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, quiz_data: dic
         f"⏳ <b>Tashlab ketilgan:</b> {missed} ta\n"
         f"⏱ <b>Sarflangan vaqt:</b> {time_str}\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "🏆 Natijangiz muvaffaqiyatli saqlandi!\n\n"
-        "👨‍💻 <b>Admin:</b> <a href='https://t.me/PigeonPY'>OZOD</a>"
+        "🏆 Natijangiz muvaffaqiyatli saqlandi!"
     )
         
     await bot.send_message(user_id, text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)

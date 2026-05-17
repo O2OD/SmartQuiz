@@ -1,6 +1,8 @@
 import os
+import re
 import urllib.parse
 import uuid
+import csv
 from docx import Document
 from aiogram import Router, Bot, types, F
 from aiogram.filters import Command
@@ -8,9 +10,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 )
+from sqlalchemy import select
 from core.config import settings
+from database.engine import async_session_maker
+from database.models import Result
 from handlers.solo_quiz import db_quizzes, solo_sessions
 
 admin_router = Router()
@@ -34,10 +39,36 @@ async def get_stats(message: types.Message):
     active_users = len(solo_sessions)
     text = (
         "📊 <b>Bot Statistikasi</b>\n\n"
-        f"📁 Jami testlar bazasi: {total_quizzes} ta\n"
-        f"🏃‍♂️ Hozir test ishlayotganlar: {active_users} kishi\n"
+        f"📁 Faol testlar bazasi: {total_quizzes} ta\n"
+        f"🏃‍♂️ Hozir test ishlayotganlar: {active_users} kishi\n\n"
+        "<i>Barcha natijalarni Excel faylida olish uchun /export buyrug'ini bosing.</i>"
     )
     await message.answer(text, parse_mode="HTML")
+
+@admin_router.message(Command("export"), F.from_user.id == settings.ADMIN_ID)
+async def export_results(message: types.Message):
+    temp_msg = await message.answer("⏳ Ma'lumotlar bazadan olinmoqda...")
+    
+    async with async_session_maker() as session:
+        result = await session.execute(select(Result))
+        records = result.scalars().all()
+
+    if not records:
+        await temp_msg.edit_text("⚠️ Bazada hali hech qanday natija yo'q.")
+        return
+
+    filename = f"natijalar_{uuid.uuid4().hex[:6]}.csv"
+    with open(filename, mode='w', newline='', encoding='utf-8-sig') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Foydalanuvchi ID", "Test nomi", "To'g'ri javob", "Jami savol", "Vaqt (sek)"])
+        for r in records:
+            writer.writerow([r.user_id, r.quiz_name, r.score, r.total, r.time_spent])
+
+    doc = FSInputFile(filename)
+    await message.answer_document(doc, caption="📊 Barcha test natijalari (Excel/CSV formati)", parse_mode="HTML")
+    
+    await temp_msg.delete()
+    os.remove(filename)
 
 @admin_router.message(Command("clear"), F.from_user.id == settings.ADMIN_ID)
 async def clear_state(message: types.Message, state: FSMContext):
@@ -68,13 +99,19 @@ async def handle_docx_file(message: types.Message, state: FSMContext, bot: Bot):
             if not text:
                 continue
             
-            if text[0].isdigit() and (text[1] == '.' or text[2] == '.'):
+            if re.match(r'^\d+[\/\.]', text):
                 if current_q and len(current_q['variantlar']) >= 2:
                     questions.append(current_q)
                 current_q = {'savol': text, 'variantlar': [], 'togri': 0}
             elif current_q is not None:
-                is_correct = text.startswith('*')
-                clean_text = text[1:].strip() if is_correct else text
+                is_correct = False
+                
+                if text.startswith('*'):
+                    is_correct = True
+                elif not text.startswith('#') and not text.startswith('-'):
+                    is_correct = True
+                    
+                clean_text = text.lstrip('*#-+ ').strip()
                 
                 if is_correct:
                     current_q['togri'] = len(current_q['variantlar'])
@@ -106,8 +143,8 @@ async def handle_docx_file(message: types.Message, state: FSMContext, bot: Bot):
         )
         await state.set_state(QuizState.waiting_for_time)
 
-    except Exception:
-        pass
+    except Exception as e:
+        await message.answer(f"⚠️ Xatolik yuz berdi: {e}")
     finally:
         if os.path.exists(local_filename):
             os.remove(local_filename)
@@ -130,7 +167,13 @@ async def set_time_handler(message: types.Message, state: FSMContext, bot: Bot):
     q_count = len(db_quizzes[quiz_id]['questions'])
     
     bot_link = f"https://t.me/{bot_info.username}?start=solo_{quiz_id}"
-    share_text = f"Men {quiz_name} testini yechmoqchiman. Sen ham sinab ko'r!"
+    share_text = (
+        "👆 Yuqoridagi ssilka orqali testni boshlang!\n\n"
+        f"📚 Mavzu: {quiz_name}\n"
+        f"🔢 Savollar soni: {q_count} ta\n"
+        f"⏳ Ajratilgan vaqt: {vaqt} soniya\n"
+        "👨‍💻 Admin: @PigeonPY"
+    )
     share_url = f"https://t.me/share/url?url={bot_link}&text={urllib.parse.quote(share_text)}"
     
     markup = InlineKeyboardMarkup(inline_keyboard=[
