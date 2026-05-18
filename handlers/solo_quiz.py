@@ -5,8 +5,8 @@ import random
 import urllib.parse
 from aiogram import Router, Bot, types, F
 from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from sqlalchemy import select
+
+
 from core.config import settings
 from database.engine import async_session_maker
 from database.models import Result, Quiz
