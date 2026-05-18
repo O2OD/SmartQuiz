@@ -12,11 +12,10 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
     InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 )
-from sqlalchemy import select
+from sqlalchemy import select, func
 from core.config import settings
 from database.engine import async_session_maker
-from database.models import Result
-from handlers.solo_quiz import db_quizzes, solo_sessions
+from database.models import Result, Quiz
 
 admin_router = Router()
 
@@ -35,12 +34,17 @@ time_kb = ReplyKeyboardMarkup(
 
 @admin_router.message(Command("stats"), F.from_user.id == settings.ADMIN_ID)
 async def get_stats(message: types.Message):
-    total_quizzes = len(db_quizzes)
-    active_users = len(solo_sessions)
+    async with async_session_maker() as session:
+        quizzes_count = await session.execute(select(func.count(Quiz.id)))
+        total_quizzes = quizzes_count.scalar()
+        
+        results_count = await session.execute(select(func.count(Result.id)))
+        total_results = results_count.scalar()
+
     text = (
         "📊 <b>Bot Statistikasi</b>\n\n"
-        f"📁 Faol testlar bazasi: {total_quizzes} ta\n"
-        f"🏃‍♂️ Hozir test ishlayotganlar: {active_users} kishi\n\n"
+        f"📁 Bazadagi jami testlar: {total_quizzes} ta\n"
+        f"🏃‍♂️ Jami yechilgan testlar: {total_results} ta\n\n"
         "<i>Barcha natijalarni Excel faylida olish uchun /export buyrug'ini bosing.</i>"
     )
     await message.answer(text, parse_mode="HTML")
@@ -95,11 +99,11 @@ async def handle_docx_file(message: types.Message, state: FSMContext, bot: Bot):
         current_q = None
 
         for para in doc.paragraphs:
-            text = para.text.strip()
+            text = para.text.replace('\xa0', ' ').strip()
             if not text:
                 continue
             
-            if re.match(r'^\d+[\/\.]', text):
+            if re.match(r'^\d+', text):
                 if current_q and len(current_q['variantlar']) >= 2:
                     questions.append(current_q)
                 current_q = {'savol': text, 'variantlar': [], 'togri': 0}
@@ -111,12 +115,12 @@ async def handle_docx_file(message: types.Message, state: FSMContext, bot: Bot):
                 elif not text.startswith('#') and not text.startswith('-'):
                     is_correct = True
                     
-                clean_text = text.lstrip('*#-+ ').strip()
+                clean_text = re.sub(r'^[ \t*#\-+]+', '', text).strip()
                 
-                if is_correct:
-                    current_q['togri'] = len(current_q['variantlar'])
-                
-                current_q['variantlar'].append(clean_text)
+                if clean_text:
+                    if is_correct:
+                        current_q['togri'] = len(current_q['variantlar'])
+                    current_q['variantlar'].append(clean_text)
 
         if current_q and len(current_q['variantlar']) >= 2:
             questions.append(current_q)
@@ -128,13 +132,8 @@ async def handle_docx_file(message: types.Message, state: FSMContext, bot: Bot):
         quiz_id = str(uuid.uuid4())[:8]
         quiz_name = document.file_name.replace('.docx', '')
         
-        db_quizzes[quiz_id] = {
-            'name': quiz_name,
-            'questions': questions,
-            'time': 15 
-        }
+        await state.update_data(quiz_id=quiz_id, quiz_name=quiz_name, questions=questions)
         
-        await state.update_data(quiz_id=quiz_id)
         await message.answer(
             f"✅ Fayl o'qildi. <b>{len(questions)} ta</b> savol topildi.\n\n"
             "⏱ Har bir savol uchun vaqtni (soniyada) tanlang yoki yozing:", 
@@ -158,13 +157,23 @@ async def set_time_handler(message: types.Message, state: FSMContext, bot: Bot):
     vaqt = int(message.text)
     data = await state.get_data()
     quiz_id = data['quiz_id']
+    quiz_name = data['quiz_name']
+    questions = data['questions']
     
-    db_quizzes[quiz_id]['time'] = vaqt
+    async with async_session_maker() as session:
+        new_quiz = Quiz(
+            id=quiz_id,
+            name=quiz_name,
+            time_limit=vaqt,
+            questions=questions
+        )
+        session.add(new_quiz)
+        await session.commit()
+        
     await state.clear()
     
     bot_info = await bot.get_me()
-    quiz_name = db_quizzes[quiz_id]['name']
-    q_count = len(db_quizzes[quiz_id]['questions'])
+    q_count = len(questions)
     
     bot_link = f"https://t.me/{bot_info.username}?start=solo_{quiz_id}"
     share_text = (
@@ -189,5 +198,5 @@ async def set_time_handler(message: types.Message, state: FSMContext, bot: Bot):
         "👨‍💻 <b>Admin:</b> <a href='https://t.me/PigeonPY'>OZOD</a>"
     )
     
-    await message.answer("✅ Test muvaffaqiyatli saqlandi!", reply_markup=ReplyKeyboardRemove())
+    await message.answer("✅ Test muvaffaqiyatli PostgreSQL bazasiga saqlandi!", reply_markup=ReplyKeyboardRemove())
     await message.answer(text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)

@@ -5,10 +5,11 @@ import random
 import urllib.parse
 from aiogram import Router, Bot, types, F
 from aiogram.filters import CommandStart
-
+from aiogram.fsm.context import FSMContext
+from sqlalchemy import select
 from core.config import settings
 from database.engine import async_session_maker
-from database.models import Result
+from database.models import Result, Quiz
 from aiogram.types import (
     InlineKeyboardMarkup, 
     InlineKeyboardButton, 
@@ -19,7 +20,6 @@ from aiogram.types import (
 
 solo_router = Router()
 
-db_quizzes = {}
 solo_sessions = {}
 active_polls = {}
 
@@ -59,16 +59,18 @@ async def cmd_start(message: types.Message, bot: Bot):
         )
 
 async def prepare_solo_test(message: types.Message, quiz_id: str, bot: Bot):
-    if quiz_id not in db_quizzes:
-        await message.answer("⚠️ Bu test topilmadi yoki muddati o'tgan.", reply_markup=ReplyKeyboardRemove())
+    async with async_session_maker() as session:
+        db_quiz = await session.get(Quiz, quiz_id)
+        
+    if not db_quiz:
+        await message.answer("⚠️ Bu test topilmadi yoki o'chirilgan.", reply_markup=ReplyKeyboardRemove())
         return
         
-    quiz_data = db_quizzes[quiz_id]
     bot_info = await bot.get_me()
-    
-    quiz_name = quiz_data['name']
-    q_count = len(quiz_data['questions'])
-    vaqt = quiz_data['time']
+    quiz_name = db_quiz.name
+    questions = db_quiz.questions
+    vaqt = db_quiz.time_limit
+    q_count = len(questions)
     
     bot_link = f"https://t.me/{bot_info.username}?start=solo_{quiz_id}"
     share_text = (
@@ -98,8 +100,11 @@ async def prepare_solo_test(message: types.Message, quiz_id: str, bot: Bot):
 async def start_countdown(call: types.CallbackQuery, bot: Bot):
     quiz_id = call.data.split("start_solo_")[1]
     
-    if quiz_id not in db_quizzes:
-        await call.answer("Test faol emas!", show_alert=True)
+    async with async_session_maker() as session:
+        db_quiz = await session.get(Quiz, quiz_id)
+        
+    if not db_quiz:
+        await call.answer("Test topilmadi!", show_alert=True)
         return
 
     solo_sessions[call.from_user.id] = {
@@ -176,8 +181,10 @@ async def manual_stop(message: types.Message, bot: Bot):
         await message.answer("Sizda faol test yo'q.", reply_markup=ReplyKeyboardRemove())
         return
         
-    quiz_data = db_quizzes.get(session["quiz_id"])
-    await finish_solo_test(user_id, bot, session, quiz_data, quiz_data["questions"], force_stop=True)
+    async with async_session_maker() as db_session:
+        db_quiz = await db_session.get(Quiz, session["quiz_id"])
+        
+    await finish_solo_test(user_id, bot, session, db_quiz, db_quiz.questions, force_stop=True)
 
 @solo_router.message(F.text == "🔄 Boshidan")
 async def manual_restart(message: types.Message, bot: Bot):
@@ -214,19 +221,21 @@ async def ask_solo_question(user_id: int, bot: Bot):
     if not session or session.get("status") != "active":
         return
 
-    quiz_data = db_quizzes.get(session["quiz_id"])
-    if not quiz_data:
+    async with async_session_maker() as db_session:
+        db_quiz = await db_session.get(Quiz, session["quiz_id"])
+        
+    if not db_quiz:
         return
 
     current_idx = session["current_idx"]
-    questions = quiz_data["questions"]
+    questions = db_quiz.questions
 
     if current_idx >= len(questions):
-        await finish_solo_test(user_id, bot, session, quiz_data, questions)
+        await finish_solo_test(user_id, bot, session, db_quiz, questions)
         return
 
     question = questions[current_idx]
-    time_limit = quiz_data["time"]
+    time_limit = db_quiz.time_limit
 
     original_options = question['variantlar']
     correct_text = original_options[question['togri']]
@@ -288,7 +297,7 @@ async def monitor_poll_timeout(user_id: int, poll_id: str, timeout: int, bot: Bo
     else:
         await ask_solo_question(user_id, bot)
 
-async def finish_solo_test(user_id: int, bot: Bot, session: dict, quiz_data: dict, questions: list, force_stop: bool = False):
+async def finish_solo_test(user_id: int, bot: Bot, session: dict, db_quiz: Quiz, questions: list, force_stop: bool = False):
     temp_msg = await bot.send_message(user_id, "⏳ Natijalar hisoblanmoqda...", reply_markup=ReplyKeyboardRemove())
     with contextlib.suppress(Exception):
         await temp_msg.delete()
@@ -305,7 +314,7 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, quiz_data: dic
     async with async_session_maker() as db_session:
         new_result = Result(
             user_id=user_id,
-            quiz_name=quiz_data['name'],
+            quiz_name=db_quiz.name,
             score=correct,
             total=seen_q,
             time_spent=raw_time 
@@ -326,7 +335,7 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, quiz_data: dic
     text = (
         f"<b>{title}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"📝 <b>Mavzu:</b> {quiz_data['name']}\n"
+        f"📝 <b>Mavzu:</b> {db_quiz.name}\n"
         f"📊 <b>Jami savollar:</b> {seen_q} ta\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"✅ <b>To'g'ri javoblar:</b> {correct} ta\n"
