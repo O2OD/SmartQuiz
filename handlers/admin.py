@@ -3,6 +3,7 @@ import re
 import urllib.parse
 import uuid
 import csv
+import asyncio
 from docx import Document
 from aiogram import Router, Bot, types, F
 from aiogram.filters import Command
@@ -15,7 +16,7 @@ from aiogram.types import (
 from sqlalchemy import select, func
 from core.config import settings
 from database.engine import async_session_maker
-from database.models import Result, Quiz
+from database.models import Result, Quiz, User
 
 admin_router = Router()
 
@@ -45,17 +46,67 @@ async def get_stats(message: types.Message):
         "📊 <b>Bot Statistikasi</b>\n\n"
         f"📁 Bazadagi jami testlar: {total_quizzes} ta\n"
         f"🏃‍♂️ Jami yechilgan testlar: {total_results} ta\n\n"
-        "<i>Barcha natijalarni Excel faylida olish uchun /export buyrug'ini bosing.</i>"
+        "<i>Barcha testlarni ko'rish uchun /list, Excel yuklash uchun /export bosing.</i>"
     )
     await message.answer(text, parse_mode="HTML")
+
+@admin_router.message(Command("list"), F.from_user.id == settings.ADMIN_ID)
+async def list_quizzes(message: types.Message, bot: Bot):
+    temp_msg = await message.answer("⏳ Testlar bazadan yuklanmoqda...")
+    
+    async with async_session_maker() as session:
+        result = await session.execute(select(Quiz).order_by(Quiz.created_at.desc()))
+        quizzes = result.scalars().all()
+
+    await temp_msg.delete()
+
+    if not quizzes:
+        await message.answer("⚠️ Bazada faol testlar topilmadi.")
+        return
+
+    bot_info = await bot.get_me()
+    await message.answer(f"📚 <b>Jami testlar: {len(quizzes)} ta.</b>\nQuyida ularning barchasi keltirilgan:", parse_mode="HTML")
+    
+    for q in quizzes:
+        q_count = len(q.questions)
+        vaqt = q.time_limit
+        quiz_name = q.name
+        quiz_id = q.id
+        
+        bot_link = f"https://t.me/{bot_info.username}?start=solo_{quiz_id}"
+        share_text = (
+            "👆 Yuqoridagi ssilka orqali testni boshlang!\n\n"
+            f"📚 Mavzu: {quiz_name}\n"
+            f"🔢 Savollar soni: {q_count} ta\n"
+            f"⏳ Ajratilgan vaqt: {vaqt} soniya\n"
+            "👨‍💻 Admin: @PigeonPY"
+        )
+        share_url = f"https://t.me/share/url?url={bot_link}&text={urllib.parse.quote(share_text)}"
+        
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="▶️ Boshlash", callback_data=f"start_solo_{quiz_id}")],
+            [InlineKeyboardButton(text="↗️ Ulashish", url=share_url)]
+        ])
+        
+        text = (
+            f"🏷 <b>Mavzu:</b> {quiz_name}\n"
+            f"📊 <b>Savollar:</b> {q_count} ta\n"
+            f"⏳ <b>Vaqt:</b> Har biriga {vaqt} soniya\n\n"
+            "Quyidagi tugmalar orqali testni o'zingiz ishlashingiz yoki do'stlaringizga ulashishingiz mumkin.\n\n"
+            "👨‍💻 <b>Admin:</b> <a href='https://t.me/PigeonPY'>OZOD</a>"
+        )
+        
+        await message.answer(text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
+        await asyncio.sleep(0.2) 
 
 @admin_router.message(Command("export"), F.from_user.id == settings.ADMIN_ID)
 async def export_results(message: types.Message):
     temp_msg = await message.answer("⏳ Ma'lumotlar bazadan olinmoqda...")
     
     async with async_session_maker() as session:
-        result = await session.execute(select(Result))
-        records = result.scalars().all()
+        stmt = select(Result, User).join(User, Result.user_id == User.user_id, isouter=True)
+        db_result = await session.execute(stmt)
+        records = db_result.all()
 
     if not records:
         await temp_msg.edit_text("⚠️ Bazada hali hech qanday natija yo'q.")
@@ -64,9 +115,12 @@ async def export_results(message: types.Message):
     filename = f"natijalar_{uuid.uuid4().hex[:6]}.csv"
     with open(filename, mode='w', newline='', encoding='utf-8-sig') as file:
         writer = csv.writer(file)
-        writer.writerow(["Foydalanuvchi ID", "Test nomi", "To'g'ri javob", "Jami savol", "Vaqt (sek)"])
-        for r in records:
-            writer.writerow([r.user_id, r.quiz_name, r.score, r.total, r.time_spent])
+        writer.writerow(["Foydalanuvchi ID", "Ismi", "Username", "Test nomi", "To'g'ri javob", "Jami savol", "Vaqt (sek)"])
+        
+        for r, u in records:
+            name = u.full_name if u else "Noma'lum"
+            username = f"@{u.username}" if (u and u.username) else "Yo'q"
+            writer.writerow([r.user_id, name, username, r.quiz_name, r.score, r.total, r.time_spent])
 
     doc = FSInputFile(filename)
     await message.answer_document(doc, caption="📊 Barcha test natijalari (Excel/CSV formati)", parse_mode="HTML")
