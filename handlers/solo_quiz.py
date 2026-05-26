@@ -3,7 +3,7 @@ import time
 import contextlib
 import random
 from aiogram import Router, Bot, types, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from sqlalchemy import select
 from core.config import settings
 from database.engine import async_session_maker
@@ -238,6 +238,22 @@ async def resume_solo_test(call: types.CallbackQuery, bot: Bot):
         await ask_solo_question(user_id, bot)
     else:
         await call.answer("Aktiv test topilmadi.", show_alert=True)
+
+@solo_router.message(Command("clear"))
+async def clear_user_state(message: types.Message, state):
+    user_id = message.from_user.id
+    
+    # 1. FSM (kiritish) holatlarini tozalash
+    await state.clear()
+    
+    # 2. Qotib qolgan aktiv test sessiyasini tozalash
+    if user_id in solo_sessions:
+        del solo_sessions[user_id]
+        
+    await message.answer(
+        "🧹 Barcha jarayonlar va holatingiz tozalandi.\n\nYangi testni boshlash uchun /start buyrug'ini bosing.", 
+        reply_markup=ReplyKeyboardRemove()
+    )        
 
 async def ask_solo_question(user_id: int, bot: Bot):
     session = solo_sessions.get(user_id)
