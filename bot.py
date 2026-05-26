@@ -6,21 +6,18 @@ from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeCha
 
 from core.config import settings
 from database.engine import init_models
+from handlers.admin import admin_router
 from handlers.solo_quiz import solo_router
 
-from handlers.admin import admin_router
-
 async def set_bot_commands(bot: Bot):
-    # 1. Barcha oddiy foydalanuvchilar uchun menyu
     user_commands = [
         BotCommand(command="start", description="🏠 Asosiy menyu"),
-        BotCommand(command="clear", description="🧹 Botni tozalash") # Ta'rif o'zgartirildi
+        BotCommand(command="clear", description="🧹 Botni tozalash")
     ]
     await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
 
-    # 2. Faqat admin uchun maxsus menyu
     admin_commands = [
-       
+        BotCommand(command="start", description="🏠 Asosiy menyu"),
         BotCommand(command="stats", description="📊 Statistika"),
         BotCommand(command="export", description="💾 Natijalar (Excel)"),
         BotCommand(command="clear", description="🧹 Tozalash")
@@ -43,9 +40,8 @@ async def main():
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher()
     
-    dp.include_router(solo_router)
-   
     dp.include_router(admin_router)
+    dp.include_router(solo_router)
     
     await set_bot_commands(bot)
     
