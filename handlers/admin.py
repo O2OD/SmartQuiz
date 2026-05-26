@@ -1,19 +1,18 @@
 import os
 import re
-import urllib.parse
 import uuid
-import csv
-import asyncio
+import datetime
+import pandas as pd
 from docx import Document
 from aiogram import Router, Bot, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+    ReplyKeyboardRemove, FSInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton
 )
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from core.config import settings
 from database.engine import async_session_maker
 from database.models import Result, Quiz, User
@@ -22,16 +21,9 @@ admin_router = Router()
 
 class QuizState(StatesGroup):
     waiting_for_file = State()
+    waiting_for_subject = State()
+    waiting_for_range = State()
     waiting_for_time = State()
-
-time_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="10"), KeyboardButton(text="20"), KeyboardButton(text="30")],
-        [KeyboardButton(text="40"), KeyboardButton(text="50"), KeyboardButton(text="60")]
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=True
-)
 
 @admin_router.message(Command("stats"), F.from_user.id == settings.ADMIN_ID)
 async def get_stats(message: types.Message):
@@ -46,65 +38,16 @@ async def get_stats(message: types.Message):
         "📊 <b>Bot Statistikasi</b>\n\n"
         f"📁 Bazadagi jami testlar: {total_quizzes} ta\n"
         f"🏃‍♂️ Jami yechilgan testlar: {total_results} ta\n\n"
-        "<i>Barcha testlarni ko'rish uchun /list, Excel yuklash uchun /export bosing.</i>"
+        "<i>Barcha testlarni ko'rish uchun botga /start bosing. Excel uchun /export.</i>"
     )
     await message.answer(text, parse_mode="HTML")
 
-@admin_router.message(Command("list"), F.from_user.id == settings.ADMIN_ID)
-async def list_quizzes(message: types.Message, bot: Bot):
-    temp_msg = await message.answer("⏳ Testlar bazadan yuklanmoqda...")
-    
-    async with async_session_maker() as session:
-        result = await session.execute(select(Quiz).order_by(Quiz.created_at.desc()))
-        quizzes = result.scalars().all()
-
-    await temp_msg.delete()
-
-    if not quizzes:
-        await message.answer("⚠️ Bazada faol testlar topilmadi.")
-        return
-
-    bot_info = await bot.get_me()
-    await message.answer(f"📚 <b>Jami testlar: {len(quizzes)} ta.</b>\nQuyida ularning barchasi keltirilgan:", parse_mode="HTML")
-    
-    for q in quizzes:
-        q_count = len(q.questions)
-        vaqt = q.time_limit
-        quiz_name = q.name
-        quiz_id = q.id
-        
-        bot_link = f"https://t.me/{bot_info.username}?start=solo_{quiz_id}"
-        share_text = (
-            "👆 Yuqoridagi ssilka orqali testni boshlang!\n\n"
-            f"📚 Mavzu: {quiz_name}\n"
-            f"🔢 Savollar soni: {q_count} ta\n"
-            f"⏳ Ajratilgan vaqt: {vaqt} soniya\n"
-            "👨‍💻 Admin: @PigeonPY"
-        )
-        share_url = f"https://t.me/share/url?url={bot_link}&text={urllib.parse.quote(share_text)}"
-        
-        markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="▶️ Boshlash", callback_data=f"start_solo_{quiz_id}")],
-            [InlineKeyboardButton(text="↗️ Ulashish", url=share_url)]
-        ])
-        
-        text = (
-            f"🏷 <b>Mavzu:</b> {quiz_name}\n"
-            f"📊 <b>Savollar:</b> {q_count} ta\n"
-            f"⏳ <b>Vaqt:</b> Har biriga {vaqt} soniya\n\n"
-            "Quyidagi tugmalar orqali testni o'zingiz ishlashingiz yoki do'stlaringizga ulashishingiz mumkin.\n\n"
-            "👨‍💻 <b>Admin:</b> <a href='https://t.me/PigeonPY'>OZOD</a>"
-        )
-        
-        await message.answer(text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
-        await asyncio.sleep(0.2) 
-
 @admin_router.message(Command("export"), F.from_user.id == settings.ADMIN_ID)
 async def export_results(message: types.Message):
-    temp_msg = await message.answer("⏳ Ma'lumotlar bazadan olinmoqda...")
+    temp_msg = await message.answer("⏳ Ma'lumotlar Excelga yuklanmoqda...")
     
     async with async_session_maker() as session:
-        stmt = select(Result, User).join(User, Result.user_id == User.user_id, isouter=True)
+        stmt = select(Result, User).join(User, Result.user_id == User.user_id, isouter=True).order_by(Result.id)
         db_result = await session.execute(stmt)
         records = db_result.all()
 
@@ -112,22 +55,58 @@ async def export_results(message: types.Message):
         await temp_msg.edit_text("⚠️ Bazada hali hech qanday natija yo'q.")
         return
 
-    filename = f"natijalar_{uuid.uuid4().hex[:6]}.csv"
-    with open(filename, mode='w', newline='', encoding='utf-8-sig') as file:
-        writer = csv.writer(file)
-        writer.writerow(["Foydalanuvchi ID", "Ismi", "Username", "Test nomi", "To'g'ri javob", "Jami savol", "Vaqt (sek)"])
+    filename = f"Natijalar_{uuid.uuid4().hex[:6]}.xlsx"
+    data = []
+    
+    for r, u in records:
+        name = u.full_name if u else "Noma'lum"
+        username = f"@{u.username}" if (u and u.username) else "Yo'q"
         
-        for r, u in records:
-            name = u.full_name if u else "Noma'lum"
-            username = f"@{u.username}" if (u and u.username) else "Yo'q"
-            writer.writerow([r.user_id, name, username, r.quiz_name, r.score, r.total, r.time_spent])
+        time_str = "Noma'lum"
+        if hasattr(r, 'created_at') and r.created_at:
+            time_str = r.created_at.strftime("%Y-%m-%d %H:%M")
+        elif hasattr(r, 'id'):
+            time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        # Excel ustunlari: Ism, Username, Test nomi, Yechilgan savollar, To'g'ri javob, Vaqt
+        data.append({
+            "Ismi": name,
+            "Username": username,
+            "Test nomi": r.quiz_name,
+            "Yechilgan savollar": r.total,
+            "To'g'ri javoblar": r.score,
+            "Vaqti": time_str
+        })
+
+    df = pd.DataFrame(data)
+    df.to_excel(filename, index=False)
 
     doc = FSInputFile(filename)
-    await message.answer_document(doc, caption="📊 Barcha test natijalari (Excel/CSV formati)", parse_mode="HTML")
+    await message.answer_document(doc, caption="📊 Barcha test natijalari", parse_mode="HTML")
     
     await temp_msg.delete()
     os.remove(filename)
 
+@admin_router.callback_query(F.data.startswith("delquiz_"), F.from_user.id == settings.ADMIN_ID)
+async def delete_quiz_handler(call: types.CallbackQuery):
+    quiz_id = call.data.split("delquiz_")[1]
+    async with async_session_maker() as session:
+        q = await session.get(Quiz, quiz_id)
+        if q:
+            # 1. Shu testning bazadagi nomini yasaymiz
+            quiz_name = f"{q.subject} {q.range_text}"
+            
+            # 2. Shu testga tegishli barcha ishlangan NATIJALARNI o'chirib tashlaymiz
+            await session.execute(delete(Result).where(Result.quiz_name == quiz_name))
+            
+            # 3. Testning o'zini o'chiramiz
+            await session.delete(q)
+            await session.commit()
+            
+            await call.answer("✅ Test va unga tegishli barcha natijalar butunlay o'chirildi!", show_alert=True)
+            await call.message.delete()
+        else:
+            await call.answer("Test topilmadi yoki allaqachon o'chirilgan.", show_alert=True)
 @admin_router.message(Command("clear"), F.from_user.id == settings.ADMIN_ID)
 async def clear_state(message: types.Message, state: FSMContext):
     await state.clear()
@@ -184,17 +163,16 @@ async def handle_docx_file(message: types.Message, state: FSMContext, bot: Bot):
             return
 
         quiz_id = str(uuid.uuid4())[:8]
-        quiz_name = document.file_name.replace('.docx', '')
-        
-        await state.update_data(quiz_id=quiz_id, quiz_name=quiz_name, questions=questions)
+        await state.update_data(quiz_id=quiz_id, questions=questions)
         
         await message.answer(
             f"✅ Fayl o'qildi. <b>{len(questions)} ta</b> savol topildi.\n\n"
-            "⏱ Har bir savol uchun vaqtni (soniyada) tanlang yoki yozing:", 
-            reply_markup=time_kb,
-            parse_mode="HTML"
+            "Endi bu test uchun <b>Fan nomini</b> kiriting:\n"
+            "<i>(Masalan: Suniy intellekt, Kiberxavfsizlik asoslari)</i>",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardRemove()
         )
-        await state.set_state(QuizState.waiting_for_time)
+        await state.set_state(QuizState.waiting_for_subject)
 
     except Exception as e:
         await message.answer(f"⚠️ Xatolik yuz berdi: {e}")
@@ -202,22 +180,54 @@ async def handle_docx_file(message: types.Message, state: FSMContext, bot: Bot):
         if os.path.exists(local_filename):
             os.remove(local_filename)
 
-@admin_router.message(QuizState.waiting_for_time, F.from_user.id == settings.ADMIN_ID)
-async def set_time_handler(message: types.Message, state: FSMContext, bot: Bot):
-    if not message.text.isdigit():
-        await message.answer("⚠️ Iltimos, faqat raqam kiriting (masalan: 20)")
-        return
-        
-    vaqt = int(message.text)
+@admin_router.message(QuizState.waiting_for_subject, F.from_user.id == settings.ADMIN_ID)
+async def set_subject_handler(message: types.Message, state: FSMContext):
+    await state.update_data(subject=message.text.strip())
+    await message.answer(
+        "📝 Endi ushbu test uchun <b>Oraliqni</b> kiriting:\n"
+        "<i>(Masalan: 1-50, 51-100)</i>",
+        parse_mode="HTML"
+    )
+    await state.set_state(QuizState.waiting_for_range)
+
+@admin_router.message(QuizState.waiting_for_range, F.from_user.id == settings.ADMIN_ID)
+async def set_range_handler(message: types.Message, state: FSMContext):
+    await state.update_data(range_text=message.text.strip())
+    
+    time_ikb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="20", callback_data="settime_20"),
+                InlineKeyboardButton(text="30", callback_data="settime_30")
+            ],
+            [
+                InlineKeyboardButton(text="40", callback_data="settime_40"),
+                InlineKeyboardButton(text="50", callback_data="settime_50")
+            ]
+        ]
+    )
+    
+    await message.answer(
+        "⏱ Har bir savol uchun vaqtni (soniyada) tanlang:", 
+        reply_markup=time_ikb
+    )
+    await state.set_state(QuizState.waiting_for_time)
+
+@admin_router.callback_query(QuizState.waiting_for_time, F.data.startswith("settime_"), F.from_user.id == settings.ADMIN_ID)
+async def set_time_cb_handler(call: types.CallbackQuery, state: FSMContext):
+    vaqt = int(call.data.split("_")[1])
     data = await state.get_data()
+    
     quiz_id = data['quiz_id']
-    quiz_name = data['quiz_name']
+    subject = data['subject']
+    range_text = data['range_text']
     questions = data['questions']
     
     async with async_session_maker() as session:
         new_quiz = Quiz(
             id=quiz_id,
-            name=quiz_name,
+            subject=subject,
+            range_text=range_text,
             time_limit=vaqt,
             questions=questions
         )
@@ -226,31 +236,12 @@ async def set_time_handler(message: types.Message, state: FSMContext, bot: Bot):
         
     await state.clear()
     
-    bot_info = await bot.get_me()
-    q_count = len(questions)
-    
-    bot_link = f"https://t.me/{bot_info.username}?start=solo_{quiz_id}"
-    share_text = (
-        "👆 Yuqoridagi ssilka orqali testni boshlang!\n\n"
-        f"📚 Mavzu: {quiz_name}\n"
-        f"🔢 Savollar soni: {q_count} ta\n"
-        f"⏳ Ajratilgan vaqt: {vaqt} soniya\n"
-        "👨‍💻 Admin: @PigeonPY"
-    )
-    share_url = f"https://t.me/share/url?url={bot_link}&text={urllib.parse.quote(share_text)}"
-    
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ Boshlash", callback_data=f"start_solo_{quiz_id}")],
-        [InlineKeyboardButton(text="↗️ Ulashish", url=share_url)]
-    ])
-    
     text = (
-        f"🏷 <b>Mavzu:</b> {quiz_name}\n"
-        f"📊 <b>Savollar:</b> {q_count} ta\n"
+        f"✅ <b>Test muvaffaqiyatli saqlandi!</b>\n\n"
+        f"🏷 <b>Fan:</b> {subject}\n"
+        f"🔢 <b>Oraliq:</b> {range_text}\n"
+        f"📊 <b>Savollar:</b> {len(questions)} ta\n"
         f"⏳ <b>Vaqt:</b> Har biriga {vaqt} soniya\n\n"
-        "Quyidagi tugmalar orqali testni o'zingiz ishlashingiz yoki do'stlaringizga ulashishingiz mumkin.\n\n"
-        "👨‍💻 <b>Admin:</b> <a href='https://t.me/PigeonPY'>OZOD</a>"
+        "<i>Foydalanuvchilar botga /start berganda ushbu test menyuda ko'rinadi. O'chirish uchun Fan ustiga bosganingizda O'chirish tugmasi chiqadi.</i>"
     )
-    
-    await message.answer("✅ Test muvaffaqiyatli PostgreSQL bazasiga saqlandi!", reply_markup=ReplyKeyboardRemove())
-    await message.answer(text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
+    await call.message.edit_text(text, parse_mode="HTML")

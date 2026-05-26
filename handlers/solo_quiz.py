@@ -2,14 +2,12 @@ import asyncio
 import time
 import contextlib
 import random
-import urllib.parse
 from aiogram import Router, Bot, types, F
 from aiogram.filters import CommandStart
-
-
+from sqlalchemy import select
 from core.config import settings
 from database.engine import async_session_maker
-from database.models import Result, Quiz
+from database.models import Result, Quiz, User 
 from aiogram.types import (
     InlineKeyboardMarkup, 
     InlineKeyboardButton, 
@@ -42,10 +40,27 @@ def format_time(seconds: int) -> str:
 
 @solo_router.message(CommandStart())
 async def cmd_start(message: types.Message, bot: Bot):
-    if message.text and "solo_" in message.text:
-        quiz_id = message.text.split("solo_")[1]
-        await prepare_solo_test(message, quiz_id, bot)
-        return
+    async with async_session_maker() as session:
+        user_id = message.from_user.id
+        db_user = await session.get(User, user_id)
+        
+        if not db_user:
+            new_user = User(
+                user_id=user_id,
+                full_name=message.from_user.full_name,
+                username=message.from_user.username
+            )
+            session.add(new_user)
+            await session.commit()
+        else:
+            if db_user.full_name != message.from_user.full_name or db_user.username != message.from_user.username:
+                db_user.full_name = message.from_user.full_name
+                db_user.username = message.from_user.username
+                await session.commit()
+
+        # Fanlarni bazadan olish
+        result = await session.execute(select(Quiz.subject).distinct())
+        subjects = result.scalars().all()
 
     if message.from_user.id == settings.ADMIN_ID:
         await message.answer(
@@ -53,48 +68,56 @@ async def cmd_start(message: types.Message, bot: Bot):
             "Buyruqlar: /stats, /export, /clear",
             parse_mode="HTML"
         )
-    else:
-        await message.answer(
-            "👋 Salom!\n\nTest ishlash uchun sizga berilgan maxsus ssilka ustiga bosing."
-        )
 
-async def prepare_solo_test(message: types.Message, quiz_id: str, bot: Bot):
-    async with async_session_maker() as session:
-        db_quiz = await session.get(Quiz, quiz_id)
-        
-    if not db_quiz:
-        await message.answer("⚠️ Bu test topilmadi yoki o'chirilgan.", reply_markup=ReplyKeyboardRemove())
+    if not subjects:
+        if message.from_user.id != settings.ADMIN_ID:
+            await message.answer("Hozircha tizimda testlar mavjud emas.")
         return
+
+    kb = []
+    for subj in subjects:
+        kb.append([InlineKeyboardButton(text=subj, callback_data=f"fan_{subj}")])
         
-    bot_info = await bot.get_me()
-    quiz_name = db_quiz.name
-    questions = db_quiz.questions
-    vaqt = db_quiz.time_limit
-    q_count = len(questions)
+    markup = InlineKeyboardMarkup(inline_keyboard=kb)
+    await message.answer("<b>Fan tanlang:</b>", reply_markup=markup, parse_mode="HTML")
+
+@solo_router.callback_query(F.data.startswith("fan_"))
+async def show_ranges(call: types.CallbackQuery):
+    subject_name = call.data.split("fan_")[1]
     
-    bot_link = f"https://t.me/{bot_info.username}?start=solo_{quiz_id}"
-    share_text = (
-        "👆 Yuqoridagi ssilka orqali testni boshlang!\n\n"
-        f"📚 Mavzu: {quiz_name}\n"
-        f"🔢 Savollar soni: {q_count} ta\n"
-        f"⏳ Ajratilgan vaqt: {vaqt} soniya\n"
-        "👨‍💻 Admin: @PigeonPY"
-    )
-    share_url = f"https://t.me/share/url?url={bot_link}&text={urllib.parse.quote(share_text)}"
+    async with async_session_maker() as session:
+        result = await session.execute(select(Quiz).where(Quiz.subject == subject_name))
+        quizzes = result.scalars().all()
+
+    if not quizzes:
+        await call.answer("Bu fanda testlar topilmadi.", show_alert=True)
+        return
+
+    kb = []
+    for q in quizzes:
+        # Admin uchun o'chirish tugmasini yoniga qo'shamiz
+        row = [InlineKeyboardButton(text=q.range_text, callback_data=f"start_solo_{q.id}")]
+        if call.from_user.id == settings.ADMIN_ID:
+            row.append(InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"delquiz_{q.id}"))
+        kb.append(row)
     
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ Boshlash", callback_data=f"start_solo_{quiz_id}")],
-        [InlineKeyboardButton(text="↗️ Ulashish", url=share_url)]
-    ])
+    kb.append([InlineKeyboardButton(text="⬅️ Ortga", callback_data="back_to_subjects")])
+    markup = InlineKeyboardMarkup(inline_keyboard=kb)
     
-    text = (
-        f"🏷 <b>Mavzu:</b> {quiz_name}\n"
-        f"📊 <b>Savollar:</b> {q_count} ta\n"
-        f"⏳ <b>Vaqt:</b> Har biriga {vaqt} soniya\n\n"
-        "Quyidagi tugmalar orqali testni o'zingiz ishlashingiz yoki do'stlaringizga ulashishingiz mumkin.\n\n"
-        "👨‍💻 <b>Admin:</b> <a href='https://t.me/PigeonPY'>OZOD</a>"
-    )
-    await message.answer(text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
+    await call.message.edit_text(f"<b>{subject_name}</b> fanidan test oralig'ini tanlang:", reply_markup=markup, parse_mode="HTML")
+
+@solo_router.callback_query(F.data == "back_to_subjects")
+async def back_to_subjects(call: types.CallbackQuery):
+    async with async_session_maker() as session:
+        result = await session.execute(select(Quiz.subject).distinct())
+        subjects = result.scalars().all()
+
+    kb = []
+    for subj in subjects:
+        kb.append([InlineKeyboardButton(text=subj, callback_data=f"fan_{subj}")])
+        
+    markup = InlineKeyboardMarkup(inline_keyboard=kb)
+    await call.message.edit_text("<b>Fan tanlang:</b>", reply_markup=markup, parse_mode="HTML")
 
 @solo_router.callback_query(F.data.startswith("start_solo_"))
 async def start_countdown(call: types.CallbackQuery, bot: Bot):
@@ -128,7 +151,7 @@ async def start_countdown(call: types.CallbackQuery, bot: Bot):
     
     await bot.send_message(
         call.from_user.id, 
-        "🚀 <b>Boshladik!</b>\n<i>Testni boshqarish uchun pastdagi tugmalardan foydalaning.</i>",
+        f"🚀 <b>{db_quiz.subject} ({db_quiz.range_text})</b> boshlandi!\n<i>Testni boshqarish uchun pastdagi tugmalardan foydalaning.</i>",
         reply_markup=test_controls_kb,
         parse_mode="HTML"
     )
@@ -311,10 +334,12 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, db_quiz: Quiz,
     seen_q = session['current_idx'] if force_stop else total_q
     wrong = seen_q - correct - missed
 
+    quiz_name_for_db = f"{db_quiz.subject} {db_quiz.range_text}"
+
     async with async_session_maker() as db_session:
         new_result = Result(
             user_id=user_id,
-            quiz_name=db_quiz.name,
+            quiz_name=quiz_name_for_db,
             score=correct,
             total=seen_q,
             time_spent=raw_time 
@@ -325,8 +350,15 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, db_quiz: Quiz,
     quiz_id_for_restart = session['quiz_id']
     del solo_sessions[user_id]
     
+    # O'zingiz so'ragan tugmalar (yonma-yon va pastma-past strukturada)
     kb = [
-        [InlineKeyboardButton(text="🔄 Boshidan boshlash", callback_data=f"start_solo_{quiz_id_for_restart}")]
+        [
+            InlineKeyboardButton(text="🔄 Boshidan", callback_data=f"start_solo_{quiz_id_for_restart}"),
+            InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"fan_{db_quiz.subject}")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Fanlarga qaytish", callback_data="back_to_subjects")
+        ]
     ]
     
     markup = InlineKeyboardMarkup(inline_keyboard=kb)
@@ -335,7 +367,7 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, db_quiz: Quiz,
     text = (
         f"<b>{title}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"📝 <b>Mavzu:</b> {db_quiz.name}\n"
+        f"📝 <b>Mavzu:</b> {quiz_name_for_db}\n"
         f"📊 <b>Jami savollar:</b> {seen_q} ta\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"✅ <b>To'g'ri javoblar:</b> {correct} ta\n"

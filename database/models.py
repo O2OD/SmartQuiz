@@ -27,7 +27,8 @@ class Quiz(Base):
     __tablename__ = "quizzes"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
-    name: Mapped[str] = mapped_column(String)
+    subject: Mapped[str] = mapped_column(String, nullable=False)
+    range_text: Mapped[str] = mapped_column(String, nullable=False)
     time_limit: Mapped[int] = mapped_column(Integer, default=15)
     questions: Mapped[list] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
