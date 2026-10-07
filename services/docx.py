@@ -8,24 +8,38 @@ def _parse_logic(file_bytes: bytes) -> list[dict]:
     doc = docx.Document(BytesIO(file_bytes))
     savollar = []
     joriy_savol = None
+    
     for p in doc.paragraphs:
-        text = p.text.strip()
+        text = p.text.replace('\xa0', ' ').strip()
         if not text:
             continue
             
-        if text[0].isdigit() and ("." in text[:4] or ")" in text[:4]):
+        is_question = False
+        clean_text = text
+        
+        if re.match(r'^\d+[\.\)]', text):
+            is_question = True
+            clean_text = re.sub(r'^\d+[\.\)]\s*', '', text).strip()
+        elif text.endswith('?') and (not joriy_savol or len(joriy_savol['variantlar']) >= 2):
+            is_question = True
+            
+        if is_question:
             if joriy_savol and len(joriy_savol['variantlar']) >= 2:
                 savollar.append(joriy_savol)
-            
-            clean_text = re.sub(r'^(\d+[\.\)]\s*)+', '', text)
             joriy_savol = {"savol": clean_text, "variantlar": [], "togri": 0}
             
-        elif joriy_savol:
+        elif joriy_savol is not None:
+            is_correct = False
             if text.startswith('*'):
-                joriy_savol['togri'] = len(joriy_savol['variantlar'])
-                joriy_savol['variantlar'].append(text.replace('*', '', 1).strip())
-            elif text.startswith('#'):
-                joriy_savol['variantlar'].append(text.replace('#', '', 1).strip())
+                is_correct = True
+                text = text.lstrip('*').strip()
+            elif text.startswith('-') or text.startswith('+'):
+                text = text.lstrip('-+').strip()
+                
+            if text:
+                if is_correct:
+                    joriy_savol['togri'] = len(joriy_savol['variantlar'])
+                joriy_savol['variantlar'].append(text)
     
     if joriy_savol and len(joriy_savol['variantlar']) >= 2:
         savollar.append(joriy_savol)
