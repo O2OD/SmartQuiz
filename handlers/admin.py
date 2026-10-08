@@ -19,6 +19,10 @@ admin_router = Router()
 def is_admin(user_id: int) -> bool:
     return user_id == settings.ADMIN_ID
 
+# Admin qismida ham O'zbekiston vaqtidan foydalanamiz
+def get_uzb_time():
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))
+
 class Broadcast(StatesGroup):
     waiting_for_message = State()
     confirm = State()
@@ -28,7 +32,8 @@ async def admin_stats(message: types.Message):
     if not is_admin(message.from_user.id):
         return
 
-    today_start = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Bugungi kun boshlanishini O'zbekiston vaqti bilan olamiz
+    today_start = get_uzb_time().replace(hour=0, minute=0, second=0, microsecond=0)
 
     async with async_session_maker() as session:
         users_count = await session.scalar(select(func.count(User.user_id))) or 0
@@ -168,8 +173,6 @@ async def export_results_excel(message: types.Message):
     )
     await msg.delete()
 
-# --- XABAR TARQATISH (BROADCAST) BO'LIMI ---
-
 @admin_router.message(Command("send"))
 async def start_broadcast(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -195,7 +198,6 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
     
     await state.set_state(Broadcast.confirm)
     
-    # Adminga nima yuborilishini oldindan ko'rsatamiz (Preview)
     await message.copy_to(chat_id=message.chat.id)
     await message.answer(
         f"Yuqoridagi xabar jami <b>{users_count} ta</b> foydalanuvchiga yuboriladi.\nTasdiqlaysizmi?",
@@ -227,7 +229,7 @@ async def confirm_broadcast(call: types.CallbackQuery, state: FSMContext, bot: B
         try:
             await bot.copy_message(chat_id=user_id, from_chat_id=from_chat_id, message_id=message_id)
             sent_count += 1
-            await asyncio.sleep(0.05)  # Telegram limitiga tushib qolmaslik uchun pauza
+            await asyncio.sleep(0.05)
         except Exception:
             blocked_count += 1
 
