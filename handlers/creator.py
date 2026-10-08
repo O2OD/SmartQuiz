@@ -4,7 +4,7 @@ from aiogram import Router, Bot, types, F
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from database.engine import async_session_maker
 from database.models import User, Quiz, Result
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, ReplyKeyboardRemove
@@ -20,7 +20,7 @@ class QuizCreate(StatesGroup):
 def get_start_hub_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Yangi test yaratish", callback_data="action_create_test")],
-        [InlineKeyboardButton(text="📂 Mening testlarim", callback_data="action_my_tests")],
+        [InlineKeyboardButton(text="📂 Mening testlarim", callback_data="action_my_tests_0")],
         [InlineKeyboardButton(text="❓ Qo'llanma", callback_data="action_help")]
     ])
 
@@ -53,6 +53,7 @@ async def start_cmd(message: types.Message, bot: Bot, command: CommandObject, st
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🚀 Testni boshlash", callback_data=f"restart_test_{quiz_id}")],
+            [InlineKeyboardButton(text="🏆 Reyting", callback_data=f"top_10_{quiz_id}")],
             [InlineKeyboardButton(text="↗️ Do'stlarga ulashish", url=share_url)],
             [InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="back_to_hub")]
         ])
@@ -108,6 +109,10 @@ async def handle_doc(message: types.Message, bot: Bot, state: FSMContext):
     if not message.document.file_name.endswith('.docx'):
         return await message.answer("⚠️ Faqat .docx formatidagi fayl qabul qilinadi.")
 
+    # 1-HIMOYA: Fayl hajmi 2 MB dan oshmasligi kerak
+    if message.document.file_size > 2 * 1024 * 1024:
+        return await message.answer("⚠️ <b>Xatolik!</b> Fayl hajmi 2 MB dan oshmasligi kerak. Kichikroq fayl yuklang.", parse_mode="HTML")
+
     file = await bot.get_file(message.document.file_id)
     local_name = f"temp_{uuid.uuid4().hex}.docx"
     await bot.download_file(file.file_path, local_name)
@@ -121,6 +126,10 @@ async def handle_doc(message: types.Message, bot: Bot, state: FSMContext):
         if not questions:
             err_text = "❌ <b>Fayldan savollarni o'qib bo'lmadi!</b>\nWord avtomatik raqamlashidan foydalanmang va to'g'ri javob oldiga <code>*</code> qo'ying."
             return await message.answer(err_text, parse_mode="HTML")
+
+        # 2-HIMOYA: Savollar soni 100 tadan oshmasligi kerak
+        if len(questions) > 100:
+            return await message.answer(f"⚠️ <b>Cheklov:</b> Bitta testda maksimal 100 ta savol bo'lishi mumkin.\nSizning faylingizda {len(questions)} ta savol topildi.", parse_mode="HTML")
 
         await state.update_data(q=questions)
         await state.set_state(QuizCreate.waiting_for_title)
@@ -187,8 +196,9 @@ async def set_time(call: types.CallbackQuery, state: FSMContext, bot: Bot):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Testni boshlash", callback_data=f"restart_test_{quiz_id}")],
+        [InlineKeyboardButton(text="🏆 Reyting", callback_data=f"top_10_{quiz_id}")],
         [InlineKeyboardButton(text="↗️ Ulashish", url=share_url)],
-        [InlineKeyboardButton(text="📂 Mening testlarim", callback_data="action_my_tests")]
+        [InlineKeyboardButton(text="📂 Mening testlarim", callback_data="action_my_tests_0")]
     ])
     
     try:
@@ -206,22 +216,27 @@ async def set_time(call: types.CallbackQuery, state: FSMContext, bot: Bot):
         parse_mode="HTML"
     )
 
-@creator_router.callback_query(F.data == "action_my_tests")
+# SAHIFALASH (Pagination) qo'shilgan "Mening testlarim"
+@creator_router.callback_query(F.data.startswith("action_my_tests_"))
 @creator_router.message(Command("mytests"))
 async def show_my_tests(event: types.Message | types.CallbackQuery):
     user_id = event.from_user.id
+    page = 0
+    if isinstance(event, types.CallbackQuery):
+        page = int(event.data.split("_")[-1])
+
     async with async_session_maker() as session:
-        stmt = select(Quiz).where(Quiz.owner_id == user_id).order_by(Quiz.created_at.desc())
+        total_quizzes = await session.scalar(select(func.count(Quiz.id)).where(Quiz.owner_id == user_id))
+        stmt = select(Quiz).where(Quiz.owner_id == user_id).order_by(Quiz.created_at.desc()).offset(page * 10).limit(10)
         result = await session.execute(stmt)
         quizzes = result.scalars().all()
 
-    if not quizzes:
+    if not quizzes and total_quizzes == 0:
         text = "📭 Siz hali birorta ham test yaratmabsiz."
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Yangi test yaratish", callback_data="action_create_test")],
             [InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="back_to_hub")]
         ])
-        
         try:
             if isinstance(event, types.CallbackQuery):
                 await event.message.delete()
@@ -231,12 +246,23 @@ async def show_my_tests(event: types.Message | types.CallbackQuery):
             return await event.answer(text, reply_markup=kb)
 
     buttons = []
-    for q in quizzes[:10]:
+    for q in quizzes:
         buttons.append([InlineKeyboardButton(text=f"📝 {q.subject}", callback_data=f"view_quiz_{q.id}")])
+    
+    # Sahifalash tugmalari
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Oldingi", callback_data=f"action_my_tests_{page - 1}"))
+    if (page + 1) * 10 < total_quizzes:
+        nav_buttons.append(InlineKeyboardButton(text="Keyingi ➡️", callback_data=f"action_my_tests_{page + 1}"))
+    
+    if nav_buttons:
+        buttons.append(nav_buttons)
+
     buttons.append([InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="back_to_hub")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    text = f"📂 <b>Siz yaratgan testlar ({len(quizzes)} ta):</b>\n\nKerakli test ustiga bosing:"
+    text = f"📂 <b>Siz yaratgan testlar ({total_quizzes} ta):</b>\n<i>Sahifa: {page + 1}</i>\n\nKerakli test ustiga bosing:"
     try:
         if isinstance(event, types.CallbackQuery):
             await event.message.delete()
@@ -262,9 +288,10 @@ async def view_single_quiz(call: types.CallbackQuery, bot: Bot):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Testni ishlash", callback_data=f"restart_test_{quiz_id}")],
+        [InlineKeyboardButton(text="🏆 Reyting", callback_data=f"top_10_{quiz_id}")],
         [InlineKeyboardButton(text="↗️ Do'stlarga ulashish", url=share_url)],
         [InlineKeyboardButton(text="🗑 Testni o'chirish", callback_data=f"user_del_quiz_{quiz_id}")],
-        [InlineKeyboardButton(text="⬅️ Ortga (Testlar ro'yxati)", callback_data="action_my_tests")]
+        [InlineKeyboardButton(text="⬅️ Ortga (Testlar ro'yxati)", callback_data="action_my_tests_0")]
     ])
 
     try:
@@ -311,9 +338,13 @@ async def help_cmd(event: types.Message | types.CallbackQuery):
         "2. Har bir savolni '1. ', '2. ' kabi raqam bilan boshlang.\n"
         "3. Variantlarni alohida qatorlarga yozing.\n"
         "4. To'g'ri javob oldiga yulduzcha (<code>*</code>) qo'ying.\n"
-        "5. Faylni yuborgach, testga o'zingiz xohlagan nomni bering (Masalan: <b>Ona tili (1-50)</b>).\n"
+        "5. Faylni yuborgach, testga o'zingiz xohlagan nomni bering.\n"
         "6. Har bir savol uchun vaqt me'yorini tanlang.\n\n"
-        "📂 O'zingiz yaratgan testlarni <b>Mening testlarim</b> bo'limida boshqarishingiz, qayta ulashishingiz yoki o'chirib tashlashingiz mumkin."
+        "━━━━━━━━━━━━━━━━━━\n"
+        "👨‍💻 <b>Dasturlash xizmatlari:</b>\n"
+        "Agar sizga ham shaxsiy Web-sayt, Telegram bot, SaaS ilova yoki IT loyihalar kerak bo'lsa, kanalimizni kuzatib boring:\n"
+        "👉 <b>@tirkashovozod</b>\n"
+        "<i>(Kanalga obuna bo'lish ixtiyoriy, botdan doimiy foydalanish bepul!)</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="back_to_hub")]
@@ -338,3 +369,13 @@ async def help_cmd(event: types.Message | types.CallbackQuery):
 async def clear_cmd(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("🧹 Chat tozalandi, barcha jarayonlar bekor qilindi.", reply_markup=ReplyKeyboardRemove())
+
+@creator_router.message()
+async def unknown_message_handler(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        text = (
+            "🤷‍♂️ <b>Kechirasiz, men sizni tushunmadim.</b>\n\n"
+            "Botdan foydalanish uchun quyidagi menyudan kerakli bo'limni tanlang:"
+        )
+        await message.answer(text, reply_markup=get_start_hub_kb(), parse_mode="HTML")

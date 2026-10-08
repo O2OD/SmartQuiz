@@ -1,9 +1,12 @@
 import os
 import io
 import datetime
-from aiogram import Router, types, F
+import asyncio
+from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select, func
 import openpyxl
 
@@ -16,6 +19,10 @@ admin_router = Router()
 def is_admin(user_id: int) -> bool:
     return user_id == settings.ADMIN_ID
 
+class Broadcast(StatesGroup):
+    waiting_for_message = State()
+    confirm = State()
+
 @admin_router.message(Command("stats"))
 async def admin_stats(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -26,20 +33,16 @@ async def admin_stats(message: types.Message):
     async with async_session_maker() as session:
         users_count = await session.scalar(select(func.count(User.user_id))) or 0
         quizzes_count = await session.scalar(select(func.count(Quiz.id))) or 0
-        
-        # Testning "Boshlash" tugmasi bosilgan jami marta
         results_count = await session.scalar(select(func.sum(Quiz.play_count))) or 0
-
         today_users = await session.scalar(
             select(func.count(User.user_id)).where(User.created_at >= today_start)
         ) or 0
         
-        # O'rtacha foiz va boshqalar
         avg_score_res = await session.execute(
             select(func.sum(Result.score), func.sum(Result.total))
         )
         total_correct, total_asked = avg_score_res.first()
-        avg_percentage = round((total_correct / total_asked * 100), 1) if total_asked else 0
+        avg_percentage = round((total_correct / total_asked * 100), 1) if total_asked and total_asked > 0 else 0
 
     text = (
         "📈 <b>Platforma umumiy statistikasi:</b>\n"
@@ -75,7 +78,7 @@ async def list_quizzes_for_admin(message: types.Message):
     for q_id, subject, owner_id, plays in quizzes:
         text += (
             f"🔹 <b>{subject}</b>\n"
-            f"   ├ Boshlangan: <b>{plays}</b> marta\n"
+            f"   ├ Boshlangan: <b>{plays or 0}</b> marta\n"
             f"   └ Muallif ID: <code>{owner_id}</code>\n\n"
         )
         buttons.append([InlineKeyboardButton(text=f"🗑 O'chirish: {subject[:20]}", callback_data=f"del_quiz_{q_id}")])
@@ -164,3 +167,74 @@ async def export_results_excel(message: types.Message):
         parse_mode="HTML"
     )
     await msg.delete()
+
+# --- XABAR TARQATISH (BROADCAST) BO'LIMI ---
+
+@admin_router.message(Command("send"))
+async def start_broadcast(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.set_state(Broadcast.waiting_for_message)
+    await message.answer(
+        "📢 <b>Xabar tarqatish bo'limi!</b>\n\n"
+        "Barcha foydalanuvchilarga yubormoqchi bo'lgan xabaringizni (matn, rasm yoki video) yuboring:",
+        parse_mode="HTML"
+    )
+
+@admin_router.message(Broadcast.waiting_for_message)
+async def process_broadcast_message(message: types.Message, state: FSMContext):
+    await state.update_data(message_id=message.message_id, from_chat_id=message.chat.id)
+    
+    async with async_session_maker() as session:
+        users_count = await session.scalar(select(func.count(User.user_id))) or 0
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Hammaga yuborish", callback_data="confirm_broadcast")],
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_broadcast")]
+    ])
+    
+    await state.set_state(Broadcast.confirm)
+    
+    # Adminga nima yuborilishini oldindan ko'rsatamiz (Preview)
+    await message.copy_to(chat_id=message.chat.id)
+    await message.answer(
+        f"Yuqoridagi xabar jami <b>{users_count} ta</b> foydalanuvchiga yuboriladi.\nTasdiqlaysizmi?",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+@admin_router.callback_query(Broadcast.confirm, F.data == "cancel_broadcast")
+async def cancel_broadcast(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("❌ Xabar tarqatish bekor qilindi.")
+
+@admin_router.callback_query(Broadcast.confirm, F.data == "confirm_broadcast")
+async def confirm_broadcast(call: types.CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    message_id = data.get("message_id")
+    from_chat_id = data.get("from_chat_id")
+    await state.clear()
+
+    await call.message.edit_text("⏳ Xabar tarqatilmoqda, kuting...")
+
+    async with async_session_maker() as session:
+        users = (await session.execute(select(User.user_id))).scalars().all()
+
+    sent_count = 0
+    blocked_count = 0
+
+    for user_id in users:
+        try:
+            await bot.copy_message(chat_id=user_id, from_chat_id=from_chat_id, message_id=message_id)
+            sent_count += 1
+            await asyncio.sleep(0.05)  # Telegram limitiga tushib qolmaslik uchun pauza
+        except Exception:
+            blocked_count += 1
+
+    text = (
+        "✅ <b>Xabar tarqatish yakunlandi!</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📨 Yuborildi: {sent_count} ta\n"
+        f"🚫 Bloklagan/Xato: {blocked_count} ta\n"
+    )
+    await bot.send_message(from_chat_id, text, parse_mode="HTML")

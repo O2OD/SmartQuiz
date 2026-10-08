@@ -4,15 +4,15 @@ import contextlib
 from aiogram import Router, Bot, types, F
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramForbiddenError
+from sqlalchemy import select
 from database.engine import async_session_maker
-from database.models import Quiz, Result
+from database.models import Quiz, Result, User
 
 play_router = Router()
 
 solo_sessions = {}
 active_polls = {}
 
-# 1. Test faol bo'lgandagi klaviatura
 active_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="⏸ Pauza"), KeyboardButton(text="⏹ To'xtatish")],
@@ -21,7 +21,6 @@ active_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# 2. Test pauza qilingandagi klaviatura (Pauza o'rniga Davom etish chiqadi)
 paused_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="▶️ Davom etish"), KeyboardButton(text="⏹ To'xtatish")],
@@ -141,7 +140,6 @@ async def monitor_poll_timeout(user_id: int, poll_id: str, timeout: int, bot: Bo
     if session["misses"] >= 2:
         session["status"] = "paused"
         try:
-            # Inline tugmalarsiz, faqat pastki klaviaturani o'zgartiramiz
             await bot.send_message(
                 chat_id=user_id,
                 text="⏸ <b>Test avtomatik pauza qilindi.</b>\nKetma-ket 2 ta savolga javob bermadingiz.",
@@ -181,7 +179,6 @@ async def manual_pause(message: types.Message):
     session = solo_sessions.get(user_id)
     if session and session.get("status") == "active":
         session["status"] = "paused"
-        # Inline tugmalarsiz, faqat pastki klaviaturani almashtiramiz
         await message.answer("⏸ <b>Test pauza qilindi.</b>", reply_markup=paused_kb, parse_mode="HTML")
 
 @play_router.message(F.text == "▶️ Davom etish")
@@ -224,6 +221,47 @@ async def restart_test_callback(call: types.CallbackQuery, bot: Bot):
         await call.message.delete()
     await start_shared_quiz(call, bot, quiz_id)
 
+# YANGILANGAN REYTING: Har bir foydalanuvchining faqat bitta (eng yaxshi) natijasi chiqadi
+@play_router.callback_query(F.data.startswith("top_10_"))
+async def show_top_10(call: types.CallbackQuery):
+    quiz_id = call.data.split("top_10_")[1]
+    
+    async with async_session_maker() as session:
+        db_quiz = await session.get(Quiz, quiz_id)
+        if not db_quiz:
+            return await call.answer("Test topilmadi.", show_alert=True)
+            
+        stmt = (
+            select(User.user_id, User.full_name, Result.score, Result.time_spent)
+            .join(User, Result.user_id == User.user_id)
+            .where(Result.quiz_id == quiz_id)
+            .order_by(Result.score.desc(), Result.time_spent.asc())
+        )
+        res = await session.execute(stmt)
+        all_attempts = res.all()
+        
+    # Python orqali takrorlanuvchi shaxslarni olib tashlash
+    top_users = []
+    seen_users = set()
+    
+    for uid, name, score, time_spent in all_attempts:
+        if uid not in seen_users:
+            top_users.append((name, score, time_spent))
+            seen_users.add(uid)
+        if len(top_users) == 10:
+            break
+            
+    if not top_users:
+        return await call.answer("Bazada hali hech kim bu testni to'liq ishlagani yo'q.", show_alert=True)
+        
+    text = f"🏆 <b>{db_quiz.subject} - TOP 10 Reyting</b>\n━━━━━━━━━━━━━━━━━━\n"
+    for idx, (name, score, time_spent) in enumerate(top_users, 1):
+        display_name = name[:15] if name else "Foydalanuvchi"
+        text += f"<b>{idx}.</b> {display_name} — {score} ta to'g'ri ({format_time(time_spent)})\n"
+        
+    await call.message.answer(text, parse_mode="HTML")
+    await call.answer()
+
 async def finish_solo_test(user_id: int, bot: Bot, session: dict, db_quiz: Quiz, questions: list, force_stop: bool = False):
     try:
         temp_msg = await bot.send_message(user_id, "⏳ Natijalar hisoblanmoqda...", reply_markup=ReplyKeyboardRemove())
@@ -262,6 +300,7 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, db_quiz: Quiz,
 
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Qayta topshirish", callback_data=f"restart_test_{quiz_id}")],
+        [InlineKeyboardButton(text="🏆 Reyting", callback_data=f"top_10_{quiz_id}")],
         [InlineKeyboardButton(text="↗️ Ulashish", url=share_url)],
         [InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="back_to_hub")]
     ])
