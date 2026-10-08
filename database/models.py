@@ -1,34 +1,32 @@
 import datetime
-from sqlalchemy import BigInteger, String, Integer, JSON, ForeignKey, DateTime
-from sqlalchemy.orm import declarative_base, mapped_column, Mapped
+from sqlalchemy import Column, BigInteger, String, Integer, JSON, DateTime
+from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
 class User(Base):
     __tablename__ = 'users'
-    
-    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    full_name: Mapped[str] = mapped_column(String, nullable=True)
-    username: Mapped[str] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
+    user_id = Column(BigInteger, primary_key=True)
+    full_name = Column(String, nullable=True)
+    username = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 class Quiz(Base):
     __tablename__ = 'quizzes'
-    
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    owner_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('users.user_id', ondelete='CASCADE'))
-    subject: Mapped[str] = mapped_column(String)
-    time_limit: Mapped[int] = mapped_column(Integer)
-    questions: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
+    id = Column(String, primary_key=True)
+    owner_id = Column(BigInteger)
+    subject = Column(String)
+    time_limit = Column(Integer)
+    questions = Column(JSON)
+    play_count = Column(Integer, default=0)  # YANGI: Test necha marta boshlanganini sanaydi
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 class Result(Base):
     __tablename__ = 'results'
-    
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('users.user_id', ondelete='CASCADE'))
-    quiz_id: Mapped[str] = mapped_column(String, ForeignKey('quizzes.id', ondelete='CASCADE'))
-    score: Mapped[int] = mapped_column(Integer)
-    total: Mapped[int] = mapped_column(Integer)
-    time_spent: Mapped[int] = mapped_column(Integer)
-    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger)
+    quiz_id = Column(String)
+    score = Column(Integer)
+    total = Column(Integer)
+    time_spent = Column(Integer)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)

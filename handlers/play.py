@@ -3,6 +3,7 @@ import time
 import contextlib
 from aiogram import Router, Bot, types, F
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramForbiddenError
 from database.engine import async_session_maker
 from database.models import Quiz, Result
 
@@ -11,27 +12,45 @@ play_router = Router()
 solo_sessions = {}
 active_polls = {}
 
-test_controls_kb = ReplyKeyboardMarkup(
+# 1. Test faol bo'lgandagi klaviatura
+active_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="⏸ Pauza"), KeyboardButton(text="⏹ To'xtatish")]
+        [KeyboardButton(text="⏸ Pauza"), KeyboardButton(text="⏹ To'xtatish")],
+        [KeyboardButton(text="🔄 Boshidan boshlash")]
+    ],
+    resize_keyboard=True
+)
+
+# 2. Test pauza qilingandagi klaviatura (Pauza o'rniga Davom etish chiqadi)
+paused_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="▶️ Davom etish"), KeyboardButton(text="⏹ To'xtatish")],
+        [KeyboardButton(text="🔄 Boshidan boshlash")]
     ],
     resize_keyboard=True
 )
 
 def format_time(seconds: int) -> str:
     m, s = divmod(seconds, 60)
-    if m == 0: return f"{s} soniya"
-    if s == 0: return f"{m} daqiqa"
+    if m == 0: 
+        return f"{s} soniya"
+    if s == 0: 
+        return f"{m} daqiqa"
     return f"{m} daqiqa {s} soniya"
 
-async def start_shared_quiz(message: types.Message, bot: Bot, quiz_id: str):
+async def start_shared_quiz(target, bot: Bot, quiz_id: str):
+    user_id = target.from_user.id
+    chat_id = target.chat.id if isinstance(target, types.Message) else target.message.chat.id
+
     async with async_session_maker() as session:
         db_quiz = await session.get(Quiz, quiz_id)
+        if not db_quiz:
+            return await bot.send_message(chat_id, "⚠️ Test topilmadi yoki o'chirilgan.", reply_markup=ReplyKeyboardRemove())
         
-    if not db_quiz:
-        return await message.answer("⚠️ Test topilmadi yoki o'chirilgan.")
+        db_quiz.play_count = (db_quiz.play_count or 0) + 1
+        await session.commit()
 
-    solo_sessions[message.from_user.id] = {
+    solo_sessions[user_id] = {
         "quiz_id": quiz_id,
         "current_idx": 0,
         "score": 0,
@@ -42,22 +61,26 @@ async def start_shared_quiz(message: types.Message, bot: Bot, quiz_id: str):
         "active_poll_id": None
     }
     
-    msg = await message.answer("⏳ Tayyorlaning...")
-    for i in [3, 2, 1]:
-        await msg.edit_text(f"⏳ {i}...")
-        await asyncio.sleep(1)
-        
-    with contextlib.suppress(Exception):
-        await msg.delete()
+    try:
+        msg = await bot.send_message(chat_id, "⏳ Tayyorlaning...")
+        for i in [3, 2, 1]:
+            await msg.edit_text(f"⏳ {i}...")
+            await asyncio.sleep(1)
+            
+        with contextlib.suppress(Exception):
+            await msg.delete()
 
-    await bot.send_message(
-        message.from_user.id, 
-        f"🚀 <b>{db_quiz.subject}</b> boshlandi!",
-        reply_markup=test_controls_kb,
-        parse_mode="HTML"
-    )
+        await bot.send_message(
+            chat_id, 
+            f"🚀 <b>{db_quiz.subject}</b> boshlandi!",
+            reply_markup=active_kb,
+            parse_mode="HTML"
+        )
+    except TelegramForbiddenError:
+        solo_sessions.pop(user_id, None)
+        return
     
-    await ask_solo_question(message.from_user.id, bot)
+    await ask_solo_question(user_id, bot)
 
 async def ask_solo_question(user_id: int, bot: Bot):
     session = solo_sessions.get(user_id)
@@ -78,16 +101,20 @@ async def ask_solo_question(user_id: int, bot: Bot):
 
     q = questions[idx]
     
-    msg = await bot.send_poll(
-        chat_id=user_id,
-        question=f"{idx + 1}/{len(questions)}. {q['savol'][:290]}",
-        options=[o[:100] for o in q['variantlar']],
-        type="quiz",
-        is_anonymous=False,
-        correct_option_id=q['togri'],
-        open_period=db_quiz.time_limit,
-        reply_markup=test_controls_kb
-    )
+    try:
+        msg = await bot.send_poll(
+            chat_id=user_id,
+            question=f"{idx + 1}/{len(questions)}. {q['savol'][:290]}",
+            options=[o[:100] for o in q['variantlar']],
+            type="quiz",
+            is_anonymous=False,
+            correct_option_id=q['togri'],
+            open_period=db_quiz.time_limit,
+            reply_markup=active_kb
+        )
+    except TelegramForbiddenError:
+        solo_sessions.pop(user_id, None)
+        return
 
     poll_id = msg.poll.id
     session["active_poll_id"] = poll_id
@@ -113,15 +140,16 @@ async def monitor_poll_timeout(user_id: int, poll_id: str, timeout: int, bot: Bo
 
     if session["misses"] >= 2:
         session["status"] = "paused"
-        markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="▶️ Davom etish", callback_data="resume_solo")]
-        ])
-        await bot.send_message(
-            chat_id=user_id,
-            text="⏸ <b>Test avtomatik pauza qilindi.</b>\nIkki marta ketma-ket javob bermadingiz.",
-            reply_markup=markup,
-            parse_mode="HTML"
-        )
+        try:
+            # Inline tugmalarsiz, faqat pastki klaviaturani o'zgartiramiz
+            await bot.send_message(
+                chat_id=user_id,
+                text="⏸ <b>Test avtomatik pauza qilindi.</b>\nKetma-ket 2 ta savolga javob bermadingiz.",
+                reply_markup=paused_kb,
+                parse_mode="HTML"
+            )
+        except TelegramForbiddenError:
+            solo_sessions.pop(user_id, None)
     else:
         await ask_solo_question(user_id, bot)
 
@@ -153,23 +181,19 @@ async def manual_pause(message: types.Message):
     session = solo_sessions.get(user_id)
     if session and session.get("status") == "active":
         session["status"] = "paused"
-        markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="▶️ Davom etish", callback_data="resume_solo")]
-        ])
-        await message.answer("⏸ <b>Test pauza qilindi.</b>", reply_markup=markup, parse_mode="HTML")
+        # Inline tugmalarsiz, faqat pastki klaviaturani almashtiramiz
+        await message.answer("⏸ <b>Test pauza qilindi.</b>", reply_markup=paused_kb, parse_mode="HTML")
 
-@play_router.callback_query(F.data == "resume_solo")
-async def resume_solo_test(call: types.CallbackQuery, bot: Bot):
-    user_id = call.from_user.id
+@play_router.message(F.text == "▶️ Davom etish")
+async def resume_solo_test(message: types.Message, bot: Bot):
+    user_id = message.from_user.id
     session = solo_sessions.get(user_id)
     if session and session.get("status") == "paused":
         session["status"] = "active"
         session["misses"] = 0
-        with contextlib.suppress(Exception):
-            await call.message.delete()
         await ask_solo_question(user_id, bot)
     else:
-        await call.answer("Aktiv test topilmadi.", show_alert=True)
+        await message.answer("Sizda pauza qilingan test topilmadi.")
 
 @play_router.message(F.text == "⏹ To'xtatish")
 async def manual_stop(message: types.Message, bot: Bot):
@@ -183,10 +207,31 @@ async def manual_stop(message: types.Message, bot: Bot):
         
     await finish_solo_test(user_id, bot, session, db_quiz, db_quiz.questions, force_stop=True)
 
-async def finish_solo_test(user_id: int, bot: Bot, session: dict, db_quiz: Quiz, questions: list, force_stop: bool = False):
-    temp_msg = await bot.send_message(user_id, "⏳ Natijalar hisoblanmoqda...", reply_markup=ReplyKeyboardRemove())
+@play_router.message(F.text == "🔄 Boshidan boshlash")
+async def manual_restart_msg(message: types.Message, bot: Bot):
+    user_id = message.from_user.id
+    session = solo_sessions.get(user_id)
+    if not session:
+        return await message.answer("Sizda faol test yo'q.", reply_markup=ReplyKeyboardRemove())
+        
+    quiz_id = session["quiz_id"]
+    await start_shared_quiz(message, bot, quiz_id)
+
+@play_router.callback_query(F.data.startswith("restart_test_"))
+async def restart_test_callback(call: types.CallbackQuery, bot: Bot):
+    quiz_id = call.data.split("restart_test_")[1]
     with contextlib.suppress(Exception):
-        await temp_msg.delete()
+        await call.message.delete()
+    await start_shared_quiz(call, bot, quiz_id)
+
+async def finish_solo_test(user_id: int, bot: Bot, session: dict, db_quiz: Quiz, questions: list, force_stop: bool = False):
+    try:
+        temp_msg = await bot.send_message(user_id, "⏳ Natijalar hisoblanmoqda...", reply_markup=ReplyKeyboardRemove())
+        with contextlib.suppress(Exception):
+            await temp_msg.delete()
+    except TelegramForbiddenError:
+        solo_sessions.pop(user_id, None)
+        return
 
     raw_time = round(time.time() - session['start_time'])
     
@@ -207,7 +252,19 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, db_quiz: Quiz,
         db_session.add(new_result)
         await db_session.commit()
         
+    quiz_id = db_quiz.id
     del solo_sessions[user_id]
+    
+    bot_info = await bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start=test_{quiz_id}"
+    share_text = f"📚 Test: {db_quiz.subject}\n📊 Savollar soni: {total_q} ta\n⏱ Vaqt: {db_quiz.time_limit} soniya\n\nQuyidagi tugma orqali bilimingizni sinab ko'ring:"
+    share_url = f"https://t.me/share/url?url={link}&text={share_text}"
+
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Qayta topshirish", callback_data=f"restart_test_{quiz_id}")],
+        [InlineKeyboardButton(text="↗️ Ulashish", url=share_url)],
+        [InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="back_to_hub")]
+    ])
     
     title = "🛑 Test to'xtatildi!" if force_stop else "🏁 Test yakunlandi!"
     text = (
@@ -216,12 +273,15 @@ async def finish_solo_test(user_id: int, bot: Bot, session: dict, db_quiz: Quiz,
         f"📝 <b>Mavzu:</b> {db_quiz.subject}\n"
         f"📊 <b>Jami savollar:</b> {seen_q} ta\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"✅ <b>To'g'ri javoblar:</b> {correct} ta\n"
-        f"❌ <b>Xato javoblar:</b> {wrong} ta\n"
+        f"✅ <b>To'g'ri:</b> {correct} ta\n"
+        f"❌ <b>Xato:</b> {wrong} ta\n"
         f"⏳ <b>Tashlab ketilgan:</b> {missed} ta\n"
         f"⏱ <b>Sarflangan vaqt:</b> {format_time(raw_time)}\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "🏆 Natijangiz muvaffaqiyatli saqlandi!"
+        "Natijangiz saqlandi! Quyidagi amallardan birini tanlang:"
     )
         
-    await bot.send_message(user_id, text, parse_mode="HTML")
+    try:
+        await bot.send_message(user_id, text, reply_markup=markup, parse_mode="HTML")
+    except TelegramForbiddenError:
+        pass
