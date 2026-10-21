@@ -402,7 +402,7 @@ async def resume_solo_test(message: types.Message, bot: Bot):
         await ask_solo_question(user_id, bot)
     else:
         await message.answer("Sizda pauza qilingan test topilmadi.")
-
+.
 @play_router.message(F.text == "⏹ To'xtatish")
 async def manual_stop(message: types.Message, bot: Bot):
     user_id = message.from_user.id
