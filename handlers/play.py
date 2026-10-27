@@ -13,7 +13,8 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select, func, delete
 import os
 
-from app.database import async_session, User, Dictionary, Word
+from database.engine import async_session_maker as async_session
+from database.models import User, Quiz, Result
 
 play_router = Router()
 
@@ -402,6 +403,7 @@ async def resume_solo_test(message: types.Message, bot: Bot):
         await ask_solo_question(user_id, bot)
     else:
         await message.answer("Sizda pauza qilingan test topilmadi.")
+
 @play_router.message(F.text == "⏹ To'xtatish")
 async def manual_stop(message: types.Message, bot: Bot):
     user_id = message.from_user.id
@@ -477,4 +479,3 @@ async def back_to_main_cb(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.delete()
     await callback.message.answer("Bosh menyu:", reply_markup=main_menu_kb())
     await callback.answer()
-    
