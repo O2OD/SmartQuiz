@@ -2,11 +2,11 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand, BotCommandScopeDefault
-from core.config import settings
-from database.engine import init_models
-from handlers.creator import creator_router
-from handlers.play import play_router
-from handlers.admin import admin_router
+from app.core.config import settings
+from app.database.engine import init_models
+from app.handlers.creator import creator_router
+from app.handlers.play import play_router
+from app.handlers.admin import admin_router
 
 async def set_main_menu(bot: Bot):
     commands = [
