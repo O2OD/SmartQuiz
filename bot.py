@@ -24,7 +24,7 @@ async def main():
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher()
     
-    # Routerlarni ulash
+    
     dp.include_router(admin_router)
     dp.include_router(creator_router)
     dp.include_router(play_router)
